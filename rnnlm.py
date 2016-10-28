@@ -5,19 +5,25 @@ import sys
 #from G.et import *
 #import G.et as dy
 #import _gdynet as G
-import dynet as G
+import _gdynet as G
+import cPickle as pickle
 
 LAYERS = 2
 INPUT_DIM = 50
 HIDDEN_DIM = 50
 
 characters = list("abcdefghijklmnopqrstuvwxyz ")
+#VOCAB_SIZE = len(characters)
+
+vocabs = pickle.load(open('data/vocab.zh-en.en.pkl'))
 characters.append("<EOS>")
 
-int2char = list(characters)
-char2int = {c: i for i, c in enumerate(characters)}
-
-VOCAB_SIZE = len(characters)
+char2int = {c: i for i, c in enumerate(vocabs)}
+char2int['<EOS>'] = len(char2int) + 1
+char2int['<UNK>'] = len(char2int) + 1
+int2char = {index: word for word, index in char2int.iteritems()}
+VOCAB_SIZE = len(char2int)
+print 'vocab size:' , VOCAB_SIZE
 
 
 model = G.Model()
@@ -39,13 +45,14 @@ def do_one_sentence(rnn, sentence):
     R = G.parameter(params['R'])
     bias = G.parameter(params['bias'])    # _G.et.Expression
     lookup = params['lookup']   # _G.et.LookupParameters
-    sentence = ['<EOS>'] + list(sentence) + ['<EOS>']
-    sentence = [char2int[c] for c in sentence]
+    sentence = ['<EOS>'] + sentence.split() + ['<EOS>']
+    sentence = [char2int[c] if c in char2int else (len(char2int)-1) for c in sentence]
     s = s0
     loss = []
     for char, next_char in zip(sentence, sentence[1:]):
+        print char, next_char, lookup[char].npvalue().shape
         s = s.add_input(lookup[char])
-        # print s.s()[1].npvalue().shape
+        print s.s()[1].npvalue().shape
         probs = G.softmax(R * s.output() + bias)
         # Picking values from vector expressions
         # e = pick(e1, k)              # k is unsigned integer, e1 is vector. return e1[k]
@@ -77,20 +84,14 @@ def generate(rnn):
     while True:
         probs = G.softmax(R * s.output() + bias)
         list_probs = probs.value()
-        # print type(list_probs)
         wid = sample(list_probs)
-        # print 'zz'
         w = int2char[wid]
         out.append(w)
-        # print wid, w
         if out[-1] == '<EOS>':
             break
         next_char_emb = lookup[wid]
         s = s.add_input(next_char_emb)
     return ''.join(out[:-1])  # strip the <EOS>
-
-# train, and genrate every 5 samples
-
 
 def train(rnn, sentence):
     trainer = G.SimpleSGDTrainer(model)
@@ -104,8 +105,5 @@ def train(rnn, sentence):
             print generate(rnn)
 
 if __name__ == '__main__':
-    sentence = "a quick brown fox jumped over the lazy dog"
-    #train(srnn, sentence)
-    #train(lstm, sentence)
-    #train(srnn, "these pretzels are making me thirsty")
-    train(lstm, "these pretzels are making me thirsty")
+    sentence = "a quick brown fox jumped over the lazy dog a quick brown fox jumped over the lazy dog"
+    train(lstm, sentence)

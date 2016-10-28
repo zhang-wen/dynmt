@@ -15,7 +15,7 @@ HIDDEN_DIM = 50
 characters = list("abcdefghijklmnopqrstuvwxyz ")
 #VOCAB_SIZE = len(characters)
 
-vocabs = pickle.load(open('data/vocab.zh-en.en.pkl'))
+vocabs = pickle.load(open('test-vocab/vocab.zh-en.en.pkl'))
 characters.append("<EOS>")
 
 char2int = {c: i for i, c in enumerate(vocabs)}

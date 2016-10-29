@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-import theano
-import theano.tensor as T
 import numpy
 import logging
 from itertools import izip
@@ -312,10 +310,10 @@ def tr_vcabset_to_dict(map_sentno_vcabset=None, map_batchno_vcabset=None):
     return map_sentno_vcbdict, map_batchno_vcbdict
 
 
-def valid_sent_target_vcab_set(src_vocab, lex_f2e, topk_trg_pkl, val_set, valids_dict, bos_token,
+def valid_sent_target_vcab_set(src_vocab, lex_f2e, topk_trg_pkl, val_set, valid_sent_dict, bos_token,
                                eos_token, unk_token, **kwargs):
-    if os.path.exists(valids_dict):
-        logger.info('{} exist'.format(valids_dict))
+    if os.path.exists(valid_sent_dict):
+        logger.info('{} exist'.format(valid_sent_dict))
         return
     logger.info('start load vocabulary for each sentence in validation data and write into file  ...')
     trg_lexical_table = load_lexical_trans_table(lex_trans_table_file=lex_f2e, ifword=True)
@@ -333,7 +331,7 @@ def valid_sent_target_vcab_set(src_vocab, lex_f2e, topk_trg_pkl, val_set, valids
            [0, 262, 1753, 1902, 2755, 53, 2, 85, 9237, 95, 4083, 106, 67, 3, 5727, 2, 6828, 918, 1922, 29999]], dtype=object)
     '''
     lines = open(val_set).readlines()
-    f_val_sent_dict_set = open(valids_dict, 'w')
+    f_val_sent_dict_set = open(valid_sent_dict, 'w')
     content = []
     for line in lines:
         line = line.strip()

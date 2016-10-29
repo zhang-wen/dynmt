@@ -121,12 +121,12 @@ if __name__ == "__main__":
             w_per_sent = ref_wcnt_wopad / minibatch_size
             loss_per_word = vb_loss_sum / ref_wcnt_wopad
             sec_per_sent = ud / minibatch_size
-            logger.info('avg_loss/word => [{0: >10}/{0: >4} = {0: >6}], '
-                        'upd[{0: >6}s], '
-                        'avg_words/sent => [{0: >4}/{} = {0: >6}], '
-                        'avg_upd/sent => [{0: >6}/{} = {0: >5}s]'.format(
-                            format(vb_loss_sum, '0.3f'), ref_wcnt_wopad,
-                            format(loss_per_word, '0.3f'),
+            logger.info('avg_loss/word => [{: >10}/{: >4} = {: >7}], '
+                        'upd[{: >6}s], '
+                        'avg_words/sent => [{: >4}/{: >2} = {: >6}], '
+                        'avg_upd/sent => [{: >6}/{: >2} = {: >5}s]'.format(
+                            format(vb_loss_sum, '0.3f'), ref_wcnt_wopad, format(
+                                loss_per_word, '0.3f'),
                             format(ud, '0.3f'),
                             ref_wcnt_wopad, minibatch_size, format(w_per_sent, '0.3f'),
                             format(ud, '0.3f'), minibatch_size, format(sec_per_sent, '0.3f')))
@@ -143,18 +143,17 @@ if __name__ == "__main__":
                 # numpy.int64, may repeat
                 logger.info('sample sentence indexes in {}th batch: {}'.format(
                     batch_start_sample, list_idx))
-                sample_src_np = numpy.zeros(shape=(sample_size, nd_source.shape[1])).astype('int64')
-                sample_trg_np = numpy.zeros(shape=(sample_size, nd_target.shape[1])).astype('int64')
+                sample_src_np = numpy.zeros(shape=(sample_size, bx.shape[1])).astype('int64')
+                sample_trg_np = numpy.zeros(shape=(sample_size, by.shape[1])).astype('int64')
                 sample_sentnos = []
                 for row in xrange(sample_size):
-                    sample_src_np[row, :] = nd_source[list_idx[row], :]
-                    sample_trg_np[row, :] = nd_target[list_idx[row], :]
+                    sample_src_np[row, :] = bx[list_idx[row], :]
+                    sample_trg_np[row, :] = by[list_idx[row], :]
                     sample_sentnos.append((batch_count_in_cur_epoch - 1) *
                                           config['batch_size'] + list_idx[row] + 1)     # start from 1
                 logger.info('sample source sentence, type: {}, shape: {}'.format(
                     type(sample_src_np), sample_src_np.shape))
-                logger.info('source sentence, type: {}, shape: {}'.format(
-                    type(nd_source), nd_source.shape))
+                logger.info('source sentence, type: {}, shape: {}'.format(type(bx), bx.shape))
 
             if batch_count % config['display_freq'] == 0:
                 dis_ud_time = time.time() - dis_start_time

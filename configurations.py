@@ -127,20 +127,28 @@ def get_config_cs2en():
     config['reload'] = True
 
     # Save model after this many updates
+    #config['save_freq'] = 10000
     config['save_freq'] = 100
 
     # about 22500 batches for one epoch
     # Show samples from model after this many updates
+    #config['sampling_freq'] = 10000
     config['sampling_freq'] = 10
 
     # Show details
+    #config['display_freq'] = 1000
     config['display_freq'] = 10
 
     # Show this many samples at each sampling, need less than batch size
     config['hook_samples'] = 3
 
     # Validate bleu after this many updates
+    #config['bleu_val_freq'] = 10000
     config['bleu_val_freq'] = 100
+
+    # Start bleu validation after this many updates
+    config['val_burn_in'] = 10000
+    config['val_burn_in'] = 30
 
     # whether use fixed sampling or randomly sampling
     config['if_fixed_sampling'] = True
@@ -157,14 +165,12 @@ def get_config_cs2en():
     config['lex_f2e'] = '/scratch2/wzhang/1.research/7.extract-phrase/1.8m-moses-nosmooth/moses-train/model/lex.f2e'
     config['phrase_table'] = '/scratch2/wzhang/1.research/7.extract-phrase/1.8m-moses-nosmooth/moses-train/model/phrase-table.gz'
 
-    # valids.dict
-    config['valids_dict'] = config['datadir'] + 'valids.dict'
+    # valid.sent.dict
+    config['valid_sent_dict'] = config['datadir'] + 'valid.sent.dict'
 
     # whether manipulate vocabulary or not
     config['if_man_vocab'] = True
 
-    # Start bleu validation after this many updates
-    config['val_burn_in'] = 30
     config['eval_dir'] = 'eval'
 
     return config

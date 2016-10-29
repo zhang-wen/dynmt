@@ -302,7 +302,7 @@ def get_dev_stream(val_set=None, src_vocab=None, src_vocab_size=30000,
 
 
 # validation set, no batch, not padding
-def get_dev_stream(val_set=None, valids_dict=None, src_vocab=None, trg_vocab=None,
+def get_dev_stream(val_set=None, valid_sent_dict=None, src_vocab=None, trg_vocab=None,
                    src_vocab_size=30000, trg_vocab_size=30000, unk_id=1, **kwargs):
     """Setup development set stream if necessary."""
 
@@ -320,7 +320,7 @@ def get_dev_stream(val_set=None, valids_dict=None, src_vocab=None, trg_vocab=Non
             bos_idx=0, eos_idx=trg_vocab_size - 1, unk_idx=unk_id)
 
         dev_dataset = TextFile([val_set], src_vocab, None)
-        dev_dictset = TextFile([valids_dict], trg_vocab, None)
+        dev_dictset = TextFile([valid_sent_dict], trg_vocab, None)
         #dev_stream = DataStream(dev_dataset)
         # Merge them to get a source, target pair
         dev_stream = Merge([dev_dataset.get_example_stream(),

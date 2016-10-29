@@ -28,9 +28,9 @@ class Translator(object):
         self.src_nhids = self.hid_dim
         self.trg_nhids = self.hid_dim
 
-        print 'build lstm model and init parameters ...',
+        logger.info('build lstm model and init parameters ...',)
         self.build_lstm_model()
-        print 'done'
+        logger.info('done')
 
     def build_lstm_model(self):
         self.model = Model()

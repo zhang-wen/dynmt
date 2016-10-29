@@ -36,7 +36,7 @@ log.*
 *.log
 nohup.out*
 data/*
-search_model_ch2en
+models_ch2en
 valids*
 
 #Tooling

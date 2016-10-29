@@ -168,7 +168,7 @@ def topk_target_vcab_list(topk_trg_pkl, ifword=False, **kwargs):
     # V_x^T
     topk_trg_vocab = pickle.load(open(topk_trg_pkl))  # dictionary
     topk_trg_vocab_num = len(topk_trg_vocab)  # unique words number
-    logger.info('\ttopk target vocab number: {}'.format(topk_trg_vocab_num))
+    logger.info('\tload top {} target words'.format(topk_trg_vocab_num))
     #src_vocab_reverse = {index: word for word, index in src_vocab.iteritems()}
     ltopk_trg_vocab_idx = []
     for word, index in topk_trg_vocab.iteritems():
@@ -314,6 +314,9 @@ def tr_vcabset_to_dict(map_sentno_vcabset=None, map_batchno_vcabset=None):
 
 def valid_sent_target_vcab_set(src_vocab, lex_f2e, topk_trg_pkl, val_set, valids_dict, bos_token,
                                eos_token, unk_token, **kwargs):
+    if os.path.exists(valids_dict):
+        logger.info('{} exist'.format(valids_dict))
+        return
     logger.info('start load vocabulary for each sentence in validation data and write into file  ...')
     trg_lexical_table = load_lexical_trans_table(lex_trans_table_file=lex_f2e, ifword=True)
     # print 'zhangwen'
@@ -353,9 +356,8 @@ def valid_sent_target_vcab_set(src_vocab, lex_f2e, topk_trg_pkl, val_set, valids
         content.append(' '.join(list(total_set)))
     f_val_sent_dict_set.write('\n'.join(content))
     f_val_sent_dict_set.close()
-    logger.info('write validation dict file done')
-
-    logger.info('traverse valid data, sentences: {}'.format(len(content)))
+    logger.info('written dict of each sentence with top words for {} '
+                'validation'.format(len(content)))
 
 
 def load_valid_sent_level_dict(x, src_vocab, trg_vocab):

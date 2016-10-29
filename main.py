@@ -1,64 +1,51 @@
 from __future__ import division
 
-import theano
-import theano.tensor as T
 import os
 import sys
-
-from utils import adadelta, step_clipping, init_dirs
-from stream_with_dict import get_tr_stream, get_dev_stream, ensure_special_tokens
+import time
+import collections
+import subprocess
 import logging
-import configurations
-from sample import trans_sample, multi_process_sample, valid_bleu
 import cPickle as pickle
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-from nmt import Translator
-import subprocess
-
 import numpy
-import time
-import collections
-#import _dynet as dy
-import _gdynet as dy
+import configurations
+from utils import adadelta, step_clipping, init_dirs
+from stream_with_dict import get_tr_stream, get_dev_stream, ensure_special_tokens
+from sample import trans_sample, multi_process_sample, valid_bleu
+#from nmt import Translator
+from nmt_debug import Translator
 
-# Get the arguments
 
 if __name__ == "__main__":
-    train_start = time.time()
     config = getattr(configurations, 'get_config_cs2en')()
 
     # prepare data
     logger.info('prepare data ...')
     prepare_file = config['prepare_file']
     subprocess.check_call(" python {}".format(prepare_file), shell=True)
+
+    from manvocab import topk_target_vcab_list
+    ltopk_trg_vocab_idx = topk_target_vcab_list(**config)
+
     logger.info('\tload source and target vocabulary ...')
+    logger.info('\twant to generate source dict {} and target dict {}: '.format(
+        config['src_vocab_size'], config['trg_vocab_size']))
     src_vocab = pickle.load(open(config['src_vocab']))
     trg_vocab = pickle.load(open(config['trg_vocab']))
-    src_vocab_num = len(src_vocab)  # unique words number
-    trg_vocab_num = len(trg_vocab)  # unique words number
     # for k, v in src_vocab.iteritems():
     #	print k, v
-    logger.info('\tsource vocab number: {}'.format(src_vocab_num))
-    logger.info('\ttarget vocab number: {}'.format(trg_vocab_num))
-    logger.info('\tsource want to generate: {}'.format(config['src_vocab_size']))
-    logger.info('\ttarget want to generate: {}'.format(config['trg_vocab_size']))
+    logger.info('\t~done source vocab count: {}, target vocab count: {}'.format(
+        len(src_vocab), len(trg_vocab)))
     logger.info('\tvocabulary contains <S>, <UNK> and </S>')
 
-    # eosid = (src_vocab_num - 1) if src_vocab_num - 3 < config['src_vocab_size'] else (config['src_vocab_size'] + 3 - 1)
-    # print 'eos idx in source: ' + str(eosid)
-
     seos_idx, teos_idx = config['src_vocab_size'] - 1, config['trg_vocab_size'] - 1
-    src_vocab = ensure_special_tokens(src_vocab,
-                                      bos_idx=0, eos_idx=seos_idx,
-                                      unk_idx=config['unk_id'])
-    trg_vocab = ensure_special_tokens(trg_vocab,
-                                      bos_idx=0, eos_idx=teos_idx,
-                                      unk_idx=config['unk_id'])
-
-    # for word, index in src_vocab.iteritems():
-    #	    print index, word
+    src_vocab = ensure_special_tokens(
+        src_vocab, bos_idx=0, eos_idx=seos_idx, unk_idx=config['unk_id'])
+    trg_vocab = ensure_special_tokens(
+        trg_vocab, bos_idx=0, eos_idx=teos_idx, unk_idx=config['unk_id'])
 
     # the trg_vocab is originally:
     #   {'UNK': 1, '<s>': 0, '</s>': 0, 'is': 5, ...}
@@ -68,18 +55,13 @@ if __name__ == "__main__":
     src_vocab_i2w = {index: word for word, index in src_vocab.iteritems()}
     # after reversing, the trg_vocab_i2w become:
     #   {1: '<UNK>', 0: '<S>', trg_vocab_size-1: '</S>', 5: 'is', ...}
-    logger.info('load dict finished ! src dic size : {} trg dic size : {}.'.format(
-        len(src_vocab), len(trg_vocab)))
 
     init_dirs(**config)
 
     tr_stream = get_tr_stream(**config)
-    logger.info('Start training!!!')
 
     k_batch_start_sample = config['k_batch_start_sample']
-    batch_size = config['batch_size']
-    sample_size = config['hook_samples']
-
+    batch_size, sample_size = config['batch_size'], config['hook_samples']
     if batch_size < sample_size:
         logger.info('batch size must be great or equal with sample size')
         sys.exit(0)
@@ -90,21 +72,16 @@ if __name__ == "__main__":
     batch_start_sample = numpy.random.randint(2, k_batch_start_sample)  # [low, high)
     logger.info('batch_start_sample: {}'.format(batch_start_sample))
 
-    batch_count, sent_count = 0, 0
-    val_time = 0
-    best_score = 0.
+    batch_count, sent_count, val_time, best_score = 0, 0, 0, 0
     model_name = ''
     sample_src_np, sample_trg_np = None, None
-    dis_start_time = time.time()
-
-    from manvocab import tr_vcabset_to_dict, topk_target_vcab_list
-    print 'load top {} ...'.format(config['topk_trg_vocab'])
-    ltopk_trg_vocab_idx = topk_target_vcab_list(**config)
-    print 'done'
 
     translator = Translator(**config)
 
     max_epochs = config['max_epoch']
+
+    logger.info('Start training!!!')
+    train_start = dis_start_time = time.time()
     for epoch in range(max_epochs):
         # take the batch sizes 3 as an example:
         # tuple: tuple[0] is indexes of source sentence (numpy.ndarray)
@@ -119,9 +96,7 @@ if __name__ == "__main__":
         eidx = epoch + 1
         print '....................... Epoch [{} / {}] .......................'.format(eidx,
                                                                                        max_epochs)
-        n_samples = 0
-        batch_count_in_cur_epoch = 0
-        epoch_total_loss = 0.
+        n_samples, epoch_total_loss, batch_count_in_cur_epoch = 0, 0., 0
         for tr_data in tr_stream.get_epoch_iterator():  # tr_data is a tuple  update one time for one batch
             batch_count += 1
             batch_count_in_cur_epoch += 1
@@ -136,25 +111,25 @@ if __name__ == "__main__":
                 list(map_batchno_vcabset[0])).astype('int32'))
 
             ud_start = time.time()
-            bloss, total_loss = 0., 0.
-            bloss, minibatch_size, total_reflen_batch = translator.upd_loss_wbatch_with_atten_sbs(
+            b_loss_sum, minibatch_size, ref_wcnt_wopad = translator.upd_loss_wbatch_with_atten_sbs(
                 bx, bxm, by, bym)
-            # print 'avg_bloss => ', type(bloss), bloss.npvalue().shape
-            vbloss = bloss.value()
-            epoch_total_loss += vbloss
-            bloss.backward()
+            vb_loss_sum = b_loss_sum.value()
+            epoch_total_loss += vb_loss_sum
+            b_loss_sum.backward()
             translator.trainer.update()
             ud = time.time() - ud_start
-            avg_sentlen = total_reflen_batch / minibatch_size
-            sec_per_sent = ud / avg_sentlen
-            logger.info('Avg_loss / sent[{} / {}={}],'
-                        'Upd[{}s],'
-                        'Avg_ref_sents / batch[{} / {}={}],'
-                        'Avg_upd / sent[{} / {}={}s]'.format(
-                            vbloss, avg_sentlen, vbloss / avg_sentlen,
-                            ud,
-                            total_reflen_batch, minibatch_size, avg_sentlen,
-                            ud, avg_sentlen, sec_per_sent))
+            w_per_sent = ref_wcnt_wopad / minibatch_size
+            loss_per_word = vb_loss_sum / ref_wcnt_wopad
+            sec_per_sent = ud / minibatch_size
+            logger.info('avg_loss/word => [{0: >10}/{0: >4} = {0: >6}], '
+                        'upd[{0: >6}s], '
+                        'avg_words/sent => [{0: >4}/{} = {0: >6}], '
+                        'avg_upd/sent => [{0: >6}/{} = {0: >5}s]'.format(
+                            format(vb_loss_sum, '0.3f'), ref_wcnt_wopad,
+                            format(loss_per_word, '0.3f'),
+                            format(ud, '0.3f'),
+                            ref_wcnt_wopad, minibatch_size, format(w_per_sent, '0.3f'),
+                            format(ud, '0.3f'), minibatch_size, format(sec_per_sent, '0.3f')))
 
             # sample, just take a look at the translate of some source sentences in training data
             if config['if_fixed_sampling'] and batch_count == batch_start_sample:
@@ -178,10 +153,8 @@ if __name__ == "__main__":
                                           config['batch_size'] + list_idx[row] + 1)     # start from 1
                 logger.info('sample source sentence, type: {}, shape: {}'.format(
                     type(sample_src_np), sample_src_np.shape))
-                # print sample_src_np
                 logger.info('source sentence, type: {}, shape: {}'.format(
                     type(nd_source), nd_source.shape))
-                # print nd_source
 
             if batch_count % config['display_freq'] == 0:
                 dis_ud_time = time.time() - dis_start_time
@@ -189,10 +162,8 @@ if __name__ == "__main__":
                 logger.info('Epoch[{}], Update(batch)[{}], Seen[{}] samples, subvocab size[{}],'
                             'Loss[{}], Update time[{}s], [{}s] for this {} batchs'.format(
                                 eidx, batch_count, n_samples, len(batch_sub_vocab),
-                                format(vbloss, '0.3f'), format(ud, '0.3f'),
+                                format(vb_loss_sum, '0.3f'), format(ud, '0.3f'),
                                 format(dis_ud_time, '0.3f'), config['display_freq']))
-                # print type(total_batchno_map_vcbset[batch_count_in_cur_epoch])
-                # print total_batchno_map_vcbset[batch_count_in_cur_epoch]
 
             if batch_count % config['sampling_freq'] == 0:
                 logger.info('translation {} samples from {}th batch'.format(
@@ -210,27 +181,6 @@ if __name__ == "__main__":
                         out = translator.translate(src_sent, ref_sent, teos_idx,
                                                    src_vocab_i2w, trg_vocab_i2w)
 
-            '''
-            if batch_count % config['save_freq'] == 0:
-                logger.info('epoch [{}], batch [{}], save model ...'.format(eidx, batch_count))
-                # save models: search_model_ch2en/params_e5_upd3000.npz
-                model_name = '{}_e{}_upd{}.{}'.format(
-                    config['model_prefix'], eidx, batch_count, 'npz')
-                trans.savez(model_name)
-
-            # trans validation data set
-            if batch_count > config['val_burn_in'] and batch_count % config['bleu_val_freq'] == 0:
-                if not os.path.exists(model_name):
-                    logger.info(
-                        'decoding on validation set before saving model ... please wait model saved')
-                else:
-                    logger.info('epoch [{}], batch [{}]: start decoding on validation data [{}]...'.format(
-                        eidx, batch_count, config['val_set']))
-                    val_time += 1
-                    child = subprocess.Popen('sh trans.sh {} {} {}'.format(
-                        eidx, batch_count, model_name), shell=True)
-            '''
-
         mean_cost_on_tr_data = epoch_total_loss / batch_count_in_cur_epoch
         epoch_time_consume = time.time() - epoch_start
         logger.info('End epoch [{}], average cost on all training data: {}, consumes time: {}s'.format(
@@ -238,7 +188,7 @@ if __name__ == "__main__":
         # translate dev
         val_time += 1
         logger.info('Batch [{}], valid time [{}], save model ...'.format(batch_count, val_time))
-        # save models: search_model_ch2en/params_e5_upd3000.npz
+        # save models: models_ch2en/params_e5_upd3000.npz
         model_name = '{}_e{}_upd{}.{}'.format(config['model_prefix'], eidx, batch_count, 'npz')
         trans.savez(model_name)
         logger.info('start decoding on validation data [{}]...'.format(config['val_set']))

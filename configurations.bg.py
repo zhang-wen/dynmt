@@ -18,7 +18,7 @@ def get_config_cs2en():
     config['n_out'] = 512
 
     # Where to save model, this corresponds to 'prefix' in groundhog
-    config['models_dir'] = 'search_model_ch2en'
+    config['models_dir'] = 'models_ch2en'
     # test output dir
     config['test_dir'] = ''
 

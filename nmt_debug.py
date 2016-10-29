@@ -4,19 +4,13 @@ import numpy as np
 
 import logging
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-# logger.setLevel(logging.INFO)
+# logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
+import configurations
 
 
 def _c(p, name):
     return '{}_{}'.format(p, name)
-
-
-def exp_to_input(input):
-    shape = input.npvalue().shape
-    input_dy = matInput(shape[0], shape[1])
-    input_dy.set(input.vec_value())
-    return input_dy
 
 
 class Translator(object):
@@ -75,20 +69,6 @@ class Translator(object):
             (self.svoc_size, self.temb_dim + self.trg_nhids + self.trg_nhids), unfiniter)
         self.no_voc_b = self.model.add_parameters((self.svoc_size), ConstInitializer(0.))
 
-        '''
-        self.dec_w_cz = self.model.add_parameters((self.hid_dim, 2 * self.src_nhids), unfiniter)
-        self.dec_w_hz = self.model.add_parameters((self.hid_dim, self.hid_dim), unfiniter)
-        self.dec_b_z = self.model.add_parameters((self.hid_dim), ConstInitializer(0.))
-
-        self.dec_w_cr = self.model.add_parameters((self.hid_dim, 2 * self.src_nhids), unfiniter)
-        self.dec_w_hr = self.model.add_parameters((self.hid_dim, self.hid_dim), unfiniter)
-        self.dec_b_r = self.model.add_parameters((self.hid_dim), ConstInitializer(0.))
-
-        self.dec_w_ch = self.model.add_parameters((self.hid_dim, 2 * self.src_nhids), unfiniter)
-        self.dec_w_hh = self.model.add_parameters((self.hid_dim, self.hid_dim), unfiniter)
-        self.dec_b_h = self.model.add_parameters((self.hid_dim), ConstInitializer(0.))
-        '''
-
     def s_sent_id2emb(self, sentence):
         return [self.s_lookup_table[wid] for wid in sentence]
 
@@ -136,28 +116,6 @@ class Translator(object):
         # weighted average over all encoded vector (2*src_hids,) of source words
         return ctx_with_attend
 
-    def forward(self, ctx_vecs, ref):
-        w = parameter(self.no_voc_w)
-        b = parameter(self.no_voc_b)
-
-        s0 = self.dec_lstm.initial_state()
-        s = s0.add_input(vecInput(self.hid_dim * 2))  # (2*hid_dim,)
-        losses = []
-        for wid in ref:
-            ctx_with_attend = self.attend(ctx_vecs, s)  # (2*hid_dim,)
-
-            s = s.add_input(ctx_with_attend)
-            # print s.output().npvalue().shape
-            # print type(w)
-            # print type(s.output())
-            out = w * s.output() + b    # (svoc_size, 1)
-            dist_voc = softmax(out)
-            losses.append(-log(pick(dist_voc, wid)))
-        sumloss = esum(losses)
-        return sumloss
-
-    import configurations
-
     def translate(self, src_sent, ref_sent, eos_idx=0, svoc=None, tvoc=None):
         def sample(probs):
             rnd = np.random.random()
@@ -168,12 +126,8 @@ class Translator(object):
             return i
 
         s_embedded = self.s_sent_id2emb(src_sent)
-        print len(s_embedded), s_embedded[0].npvalue().shape
         encoded = self.bi_enc_sentence(s_embedded)
-        print len(encoded), encoded[0].npvalue().shape
-
         t_embedded = self.t_sent_id2emb(ref_sent)
-        print len(t_embedded), t_embedded[0].npvalue().shape
 
         w = parameter(self.no_voc_w)
         b = parameter(self.no_voc_b)
@@ -185,20 +139,15 @@ class Translator(object):
         s0 = self.dec_lstm.initial_state()
         start_input = self.init_dec_input(encoded)
 
-        print start_input.npvalue().shape
         s = self.dec_lstm.initial_state().add_input(start_input)
         out_idvec = []
         maxlen = len(src_sent) * 2
         for i in range(maxlen):
             ctx_with_attend = self.attend(encoded, s)
-            print ctx_with_attend.npvalue().shape
             ctx_with_attend = a2tw * ctx_with_attend + a2tb
-            print ctx_with_attend.npvalue().shape
             s = s.add_input(ctx_with_attend)
             concat = concatenate([prevy_embbed, ctx_with_attend, s.output()])
-            print concat.npvalue().shape
             out = w * concat + b  # (voc, ) * batch
-            print out.npvalue().shape
             probs = softmax(out)
             probs = probs.vec_value()
             nwid = sample(probs)    # randomly
@@ -210,13 +159,6 @@ class Translator(object):
         print '[ref] {}'.format(' '.join([tvoc[i] for i in ref_sent]))
         print '[out] {}'.format(' '.join([tvoc[i] for i in out_idvec]))
         return out_idvec
-
-    def sent_loss(self, x, y):
-        # renew_cg()
-        emb_x = self.s_sent_id2emb(x)
-        enc = self.bi_enc_sentence(emb_x)    # (srclen, 2*hid_dim)
-        sentloss = self.forward(enc, y)
-        return sentloss
 
     def init_dec_input(self, xbienc_lhb, bxm=None):
         w = parameter(self.dec_w_init)
@@ -240,56 +182,6 @@ class Translator(object):
         logger.debug('decoder initial input {} {}'.format(
             type(init_input), init_input.npvalue().shape))
         return init_input
-
-    def convert_dec_state(self, ctx_watt, s, bxm=None):
-        w_cz = parameter(self.dec_w_cz)
-        w_hz = parameter(self.dec_w_hz)
-        b_z = parameter(self.dec_b_z)
-
-        w_cr = parameter(self.dec_w_cr)
-        w_hr = parameter(self.dec_w_hr)
-        b_r = parameter(self.dec_b_r)
-
-        w_ch = parameter(self.dec_w_ch)
-        w_hh = parameter(self.dec_w_hh)
-        b_h = parameter(self.dec_b_h)
-
-        s = s.s()[0]
-        # colwise_add(w_cz * ctx_watt, b_z)
-        logger.debug('w_cz: {} {}'.format(type(w_cz), w_cz.npvalue().shape))
-        logger.debug('attention {} {}'.format(
-            type(ctx_watt), ctx_watt.npvalue().shape))
-        # z = logistic(w_cz * ctx_watt + w_hz * s + b_z)    # sigmoid
-        # r = logistic(w_cr * ctx_watt + w_hr * s + b_r)    # sigmoid
-
-        # zw = w_cz * ctx_watt + w_hz * s
-        # ctx_watt_dy = matInput(cshape[0], cshape[1])
-        # ctx_watt_set(ctx_watt_npvalue().flatten())    # problem here...
-        # by column set
-        ctx_watt_dy = exp_to_input(ctx_watt)
-        s_dy = exp_to_input(s)
-        z = logistic(colwise_add(w_cz * ctx_watt_dy + w_hz * s_dy, b_z))
-        # z = logistic(colwise_add((w_cz * ctx_watt + w_hz * s), b_z))
-        # # sigmoid
-        r = logistic(colwise_add(
-            w_cr * ctx_watt_dy + w_hr * s_dy, b_r))    # sigmoid
-        c_h = w_ch * ctx_watt_dy
-
-        hidden = tanh(cwise_multiply(
-            colwise_add(w_hh * s_dy, b_h), r) + c_h)
-        print 'z:', type(z)
-        print z.npvalue().shape
-        hidden = cwise_multiply(s_dy, z) + cwise_multiply((1. - z), hidden)
-
-        bxm = np.transpose(bxm)
-        hidden_np = hidden.npvalue()
-        if bxm is not None:
-            hidden = bxm[:, None] * hidden_np + (1. - bxm)[:, None] * s.npvalue()
-        hshape = hidden.shape     # (src_len, batch)
-        hidden_dy = vecInput(hshape[0] * hshape[1])
-        hidden_dy.set(hidden.flatten())
-        hidden_dy = transpose(reshape(hidden_dy, (hshape[1], hshape[0])))
-        return hidden_dy
 
     def upd_loss_wbatch_with_atten_sbs(self, bx, bxm, by, bym):
         # (src_len, batch_size)
@@ -336,7 +228,7 @@ class Translator(object):
         # print start_input.npvalue()
 
         s = s0.add_input(start_input)
-        total_reflen_batch = 0
+        reflen_wopad_batch = 0
         logger.debug('decode state {} {}'.format(
             type(s.h()[-1]), s.h()[-1].npvalue().shape))
 
@@ -353,7 +245,7 @@ class Translator(object):
                 emb_batch_y[wid], (self.temb_dim,), batch_size=minibatch_size)
 
             y_filter = filter(lambda x: x != 0, by[wid])
-            total_reflen_batch += len(y_filter)
+            reflen_wopad_batch += len(y_filter)
 
             ctx_with_attend = self.attend(xbienc_lhb, s)
             # (2*src_nhids, ) * batch_size tensor
@@ -361,8 +253,8 @@ class Translator(object):
             # (trg_nhids, ) * batch_size tensor
             ctx_with_attend = reshape(
                 ctx_with_attend, (self.trg_nhids,), batch_size=minibatch_size)
-            logger.debug('context attention batch {} {}'.format(type(ctx_with_attend),
-                                                                ctx_with_attend.npvalue().shape))
+            # logger.debug('context attention batch {} {}'.format(type(ctx_with_attend),
+            #                                                      ctx_with_attend.npvalue().shape))
             # s = self.convert_dec_state(ctx_with_attend, s, bxm)
             # s.set_h([ctx_with_attend])    # s.output() is (32,80), because s.s() are all (32,80)
             # print s.h()[0].npvalue().shape
@@ -370,8 +262,8 @@ class Translator(object):
             # out = self.convert_dec_state(ctx_with_attend, s, bxm)
             # s.set_h([out])
             step_lstm_out = s.output()  # (trg_nhids,) * b
-            logger.debug('each step lstm output => {} {}'.format(
-                type(step_lstm_out), step_lstm_out.npvalue().shape))
+            # logger.debug('each step lstm output => {} {}'.format(
+            #    type(step_lstm_out), step_lstm_out.npvalue().shape))
             lstm_outputs.append(step_lstm_out)
 
             s = s.add_input(ctx_with_attend)
@@ -380,62 +272,12 @@ class Translator(object):
             out = w * concat + b  # (voc, ) * batch
             out = transpose(reshape(out, (self.svoc_size,), batch_size=minibatch_size))  # (voc,1,b)
             out = transpose(out)
-            logger.debug('final output: {}'.format(out.npvalue().shape))
-            logger.debug(list(by[:, wid].flatten()))
+            #logger.debug('final output: {}'.format(out.npvalue().shape))
+            #logger.debug(list(by[:, wid].flatten()))
             bloss = pickneglogsoftmax_batch(out, list(by[:, wid].flatten()))
-            sum_loss = sum_batches(bloss)
+            sum_loss = sum_batches(bloss)   # sum of one column in a batch
             losses.append(sum_loss)
         for l in losses:
             logger.debug('one column words in each batch loss => {} {} {}'.format(
                 type(l), l.npvalue().shape, l.npvalue()))
-        # print 'sum => ', type(esum(losses)), esum(losses).npvalue().shape, esum(losses).npvalue()
-        # zw = average(losses)
-        # print type(losses)
-        # print 'avg => ', type(average(losses)), average(losses).npvalue().shape
-        avg = esum(losses) / len(losses)
-        return avg, minibatch_size, total_reflen_batch
-
-    def upd_loss_wbatch_with_atten(self, bx, bxm, by, bym, tvoc=None):
-        # (src_len, batch_size)
-        renew_cg()
-        w = parameter(self.no_voc_w)
-        b = parameter(self.no_voc_b)
-
-        minibatch_size, src_len = bx.shape
-        total_reflen_batch = sum(
-            [len(filter(lambda x: x != 0, y)) for y in by])
-        # lstm_outputs = self.dec_lstm.initial_state().transduce(xbienc_lhb)
-        # print 'lstm output length in this batch', len(lstm_outputs)
-        # print 'lstm output batch shape', lstm_outputs[0].npvalue().shape
-        lstm_outputs = []
-
-        errors = []
-        total_reflen_batch, minibatch_size, rowid = 0, 0, 0
-        for x, xm, y, ym in zip(bx, bxm, by, bym):
-            s0 = self.dec_lstm.initial_state()
-            s = s0.add_input(vecInput(self.hid_dim * 2))  # (2*hid_dim,)
-            x = x * xm
-            y = y * ym
-            x_filter = filter(lambda x: x != 0, x)
-            y_filter = filter(lambda x: x != 0, y)
-            len_one_ref_sent = len(y_filter)
-            emb_x = self.s_sent_id2emb(x_filter)
-            # print emb_x[0].npvalue().shape
-            enc = self.bi_enc_sentence(emb_x)    # (srclen, 2*hid_dim)
-            # print enc[0].npvalue().shape
-            losses = []
-            for wid in y_filter:
-                out = w * s.output() + b
-                ctx_with_attend = self.attend(enc, s)
-                s = s.add_input(ctx_with_attend)
-                dist_voc = softmax(out)
-                losses.append(-log(pick(dist_voc, wid)))
-            errors.append(esum(losses) / len_one_ref_sent)
-            total_reflen_batch += len_one_ref_sent
-            minibatch_size += 1
-            # errors.append(esum(losses))
-            # print type(loss_sent)
-            # print loss_sent
-            # print loss_sent.value()
-        bloss = esum(errors)
-        return bloss, total_reflen_batch, minibatch_size
+        return esum(losses), minibatch_size, reflen_wopad_batch

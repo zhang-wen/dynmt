@@ -19,9 +19,9 @@ def get_config_cs2en():
     config['lstm_num_of_layers'] = 1
 
     # Where to save model, this corresponds to 'prefix' in groundhog
-    config['models_dir'] = 'search_model_ch2en'
+    config['models_out_dir'] = 'models_ch2en'
     # test output dir
-    config['test_dir'] = ''
+    config['test_out_dir'] = ''
 
     # Optimization related ----------------------------------------------------
 
@@ -102,7 +102,7 @@ def get_config_cs2en():
     config['val_prefix'] = 'nist02'
 
     # Model prefix
-    config['model_prefix'] = config['models_dir'] + '/params'
+    config['model_prefix'] = config['models_out_dir'] + '/params'
 
     # Validation set source file
     config['val_set'] = config['val_tst_dir'] + config['val_prefix'] + '.src'
@@ -137,7 +137,7 @@ def get_config_cs2en():
     config['display_freq'] = 10
 
     # Show this many samples at each sampling, need less than batch size
-    config['hook_samples'] = 5
+    config['hook_samples'] = 3
 
     # Validate bleu after this many updates
     config['bleu_val_freq'] = 100

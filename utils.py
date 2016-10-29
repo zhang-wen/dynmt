@@ -8,6 +8,7 @@ from itertools import izip
 import time
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 # --exeTime
 
@@ -158,23 +159,26 @@ import os
 import shutil
 
 
-def init_dirs(models_dir, val_out_dir, test_dir, **kwargs):
-    if os.path.exists(models_dir):
-        shutil.rmtree(models_dir)
-        print models_dir, ' exists, delete.'
-    os.mkdir(models_dir)
-    print 'create ', models_dir
+def init_dirs(models_out_dir, val_out_dir, test_out_dir, **kwargs):
+    if os.path.exists(models_out_dir):
+        shutil.rmtree(models_out_dir)
+        logger.info('{} exists'.format(models_out_dir))
+    else:
+        os.mkdir(models_out_dir)
+        logger.info('create {}'.format(models_out_dir))
 
     if not val_out_dir == '':
         if os.path.exists(val_out_dir):
             shutil.rmtree(val_out_dir)
-            print val_out_dir, ' exists, delete.'
-        os.mkdir(val_out_dir)
-        print 'create ', val_out_dir
+            logger.info('{} exists'.format(val_out_dir))
+        else:
+            os.mkdir(val_out_dir)
+            logger.info('create {}'.format(val_out_dir))
 
-    if not test_dir == '':
-        if os.path.exists(test_dir):
-            shutil.rmtree(test_dir)
-            print test_dir, ' exists, delete.'
-        os.mkdir(test_dir)
-        print 'create ', test_dir
+    if not test_out_dir == '':
+        if os.path.exists(test_out_dir):
+            shutil.rmtree(test_out_dir)
+            logger.info('{} exists'.format(test_out_dir))
+        else:
+            os.mkdir(test_out_dir)
+            logger.info('create {}'.format(test_out_dir))

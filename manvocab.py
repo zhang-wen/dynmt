@@ -17,55 +17,9 @@ from stream_with_dict import get_tr_stream
 import collections
 import os
 
-
-@exeTime
-def trg_cands_from_aln(src, trg, aln, src_vocab, trg_vocab):
-    trg_cands_dict = collections.defaultdict(list)
-    lineno = 0
-    try:
-        with open(src, 'r') as fsrc, open(trg, 'r') as ftrg, open(aln, 'r') as faln:
-            for lsrc, ltrg, laln in equizip(fsrc, ftrg, faln):
-                list_src, list_trg, list_aln = None, None, None
-                if (lsrc != '\n') and (ltrg != '\n') and (laln != '\n'):
-                    lineno += 1
-                    if lineno % 100000 == 0:
-                        print lineno
-                    list_src = lsrc.split()
-                    list_trg = ltrg.split()  # i am a good
-                    list_aln = laln.split()  # 0-1 1-0
-                    for item in list_aln:
-                        sid_insent = int(item.split('-')[0])
-                        tid_insent = int(item.split('-')[1])
-                        src_word = list_src[sid_insent]
-                        trg_word = list_trg[tid_insent]
-                        sid_indict = 1 if src_word not in src_vocab else src_vocab[src_word]
-                        tid_indict = 1 if trg_word not in trg_vocab else trg_vocab[trg_word]
-                        # the target alignment is too much for UNK, do not consider
-                        if not sid_indict == 1 and not tid_indict == 1:
-                            if tid_indict not in trg_cands_dict[sid_indict]:
-                                trg_cands_dict[sid_indict].append(tid_indict)
-    except IOError:
-        print 'may be no some file, open failed.'
-    # defaultdict(list, {2: [3, 4], 4: [0]})    {src_id_in_dict: [trg_id_in_dict0, ..., ]}
-    return trg_cands_dict
-
-
-def _2dnumpy2list(ndarr):
-    ref_vocab = []
-    for sent in ndarr:
-        for tword_idx in sent:
-            ref_vocab.append(tword_idx)
-    return list(set(ref_vocab))
-
-
-def append_file(file_prefix, content):
-    f = open(file_prefix, 'a')
-    f.write(content)
-    f.write('\n')
-    f.close()
-
-
 # src_vocab: {我:3, 爱:4, 你:22}
+
+
 def load_lexical_trans_table(src_vocab=None, trg_vocab=None, lex_trans_table_file=None, ifword=False):
     if ifword:
         logger.info('load lexical translation table (word) from {}'.format(lex_trans_table_file))
@@ -356,65 +310,3 @@ def valid_sent_target_vcab_set(src_vocab, lex_f2e, topk_trg_pkl, val_set, valid_
     f_val_sent_dict_set.close()
     logger.info('written dict of each sentence with top words for {} '
                 'validation'.format(len(content)))
-
-
-def load_valid_sent_level_dict(x, src_vocab, trg_vocab):
-    import configurations
-    config = getattr(configurations, 'get_config_cs2en')()
-
-    trg_lexical_table = load_lexical_trans_table(src_vocab, trg_vocab, config['lex_f2e'])
-    # trg_lexical_table: dict(set)
-
-    map_sentno_vcabset = collections.defaultdict(set)
-    load_trg_vocab_sent(map_sentno_vcabset, 0, x,
-                        trg_cands_dict_set=trg_lexical_table)
-    ltopk_trg_vocab_idx = topk_target_vcab_list(config['topk_trg_pkl'])
-    map_sentno_vcabset[0] |= set(ltopk_trg_vocab_idx)
-    valid_sentno_vcbdict, _ = tr_vcabset_to_dict(map_sentno_vcabset=map_sentno_vcabset)
-    #{0:0,1:1,3:2,23:3}
-    for k, v in valid_sentno_vcbdict[0].iteritems():
-        part_trg_vocab_nid2oid[v] = k
-    #{0:0,1:1,2:3,3:23}
-    np_sent_level_vocab_set = numpy.zeros((len(valid_sentno_vcbdict[0]),)).astype('int32')
-    sorted_batch_trg_dict = collections.OrderedDict(sorted(part_trg_vocab_nid2oid.items()))
-    for k, v in sorted_batch_trg_dict.iteritems():
-        np_sent_level_vocab_set[k] = v
-    part_target_vocab = np_sent_level_vocab_set     # sub_vocab, slice W0
-    # part_target_vocab(ndarray) is same with part_trg_vocab_nid2oid(dict) except the type
-    return part_trg_vocab_nid2oid, np_sent_level_vocab_set
-
-    '''
-    if not os.path.exists(config['trg_cands_dict']):
-        logger.info('start load target candidates for each source unique word by alignment')
-        trg_cands_dict = trg_cands_from_aln(config['src_data'], config['trg_data'], config[
-                                            'aln_data'], src_vocab, trg_vocab)
-        import cPickle
-        # can not use the name preprocess.dict as the python file name
-        with open(config['trg_cands_pkl'], 'wb') as f:
-            cPickle.dump(trg_cands_dict, f, protocol=cPickle.HIGHEST_PROTOCOL)
-            logger.info('save {}'.format(config['trg_cands_pkl']))
-
-        f = open(config['trg_cands_dict'], 'w')
-        for k, v in trg_cands_dict.iteritems():
-            f.writelines('{}:{}'.format(k, str(v)))  # there may be '' in the keys, because data noise
-            f.write('\n')
-        f.close()
-        logger.info('save {}'.format(config['trg_cands_dict']))
-        logger.info('done')
-    else:
-        logger.info('exists, load from {}'.format(config['trg_cands_pkl']))
-        trg_cands_dict = pickle.load(open(config['trg_cands_pkl']))
-    '''
-
-    '''
-            # obtain the target vocabulary of this batch here
-            x, y = tr_data[0], tr_data[2]   # batch_size*sent_len
-            lsrc_words_in_batch, lref_words_in_batch = _2dnumpy2list(x), _2dnumpy2list(y)
-            laln_ref_words_in_batch = []
-            for src_word_id in lsrc_words_in_batch:
-                if src_word_id in trg_cands_dict:
-                    laln_ref_words_in_batch = list(
-                        set(laln_ref_words_in_batch) | set(trg_cands_dict[src_word_id]))
-            ref_vocab = list(set(laln_ref_words_in_batch) | set(
-                ltopk_trg_vocab_idx) | set(lref_words_in_batch))
-    '''

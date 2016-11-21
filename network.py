@@ -1,441 +1,454 @@
-from _gdynet import *
-# from _dynet import *
+"""
+bi-directional rnn network for encoder
+attention rnn network for decoder
+"""
+
+from __future__ import division
+
+import time
+import random
+import sys
+import os
+
+from collections import OrderedDict
 import numpy as np
 
-import logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-# logger.setLevel(logging.INFO)
+from gru import GRU
+
+from _gdynet import *
+print
+#from _dynet import *
 
 
-def _c(p, name):
-    return '{}_{}'.format(p, name)
+class Network(object):
 
+    def __init__(
+        self,
+        swemb_dims,
+        twemb_dims,
+        enc_hidden_units,
+        dec_hidden_units,
+        align_dims,
+        logistic_in_dims,
+        src_vocab_size=30000,
+        trg_vocab_size=30000,
+        droprate=0.,
+    ):
 
-def exp_to_input(input):
-    shape = input.npvalue().shape
-    input_dy = matInput(shape[0], shape[1])
-    input_dy.set(input.vec_value())
-    return input_dy
+        self.swemb_dims = swemb_dims
+        self.twemb_dims = twemb_dims
+        self.enc_hidden_units = enc_hidden_units
+        self.dec_hidden_units = dec_hidden_units
+        self.align_dims = align_dims
+        self.logistic_in_dims = logistic_in_dims
+        self.src_vocab_size = src_vocab_size
+        self.trg_vocab_size = trg_vocab_size
 
+        self.droprate = droprate
 
-class Translator(object):
-
-    def __init__(self, **kwargs):
-        self.layers = kwargs.pop('lstm_num_of_layers', 2)
-        self.semb_dim = kwargs.pop('semb_dim1', 32)
-        self.temb_dim = kwargs.pop('temb_dim1', 32)
-        self.hid_dim = kwargs.pop('hid_dim1', 32)
-        self.att_dim = kwargs.pop('att_dim1', 32)
-        self.svoc_size = kwargs.pop('src_vocab_size', 1000)
-        self.tvoc_size = kwargs.pop('trg_vocab_size', 1000)
-        self.drop_rate = kwargs['dropout']
-
-        self.src_nhids = self.hid_dim
-        self.trg_nhids = self.hid_dim
-
-        print 'build lstm model and init parameters ...',
-        self.build_lstm_model()
-        print 'done'
-
-    def build_lstm_model(self):
         self.model = Model()
-        self.trainer = AdadeltaTrainer(self.model, eps=1e-7, rho=0.99)
 
-        self.enc_fwd_lstm = LSTMBuilder(self.layers, self.semb_dim, self.src_nhids, self.model)
-        self.enc_bck_lstm = LSTMBuilder(self.layers, self.semb_dim, self.src_nhids, self.model)
+        self.trainer = AdadeltaTrainer(self.model, eps=1e-6, rho=0.95)
+        random.seed(1)
 
-        self.dec_lstm = LSTMBuilder(self.layers, self.src_nhids, self.trg_nhids, self.model)
+        self.src_lookup_table_name = 'src_emb_lookuptable'
+        self.trg_lookup_table_name = 'trg_emb_lookuptable'
 
-        # memory...
-        self.s_lookup_table = self.model.add_lookup_parameters((self.svoc_size, self.semb_dim))
-        self.s_lookup_table.init_from_array(
-            np.random.uniform(-0.01, 0.01, (self.svoc_size, self.semb_dim)))
+        self.dec_1_Wz_name = 'GRU_Dec_Wz_1'
+        self.dec_1_Wr_name = 'GRU_Dec_Wr_1'
+        self.dec_1_Wh_name = 'GRU_Dec_Wh_1'
 
-        self.t_lookup_table = self.model.add_lookup_parameters((self.tvoc_size, self.temb_dim))
-        self.t_lookup_table.init_from_array(
-            np.random.uniform(-0.01, 0.01, (self.tvoc_size, self.temb_dim)))
+        self.attention_W_1_name = 'attention_W_1'
+        self.attention_W_2_name = 'attention_W_2'
+        self.attention_v_name = 'attention_v'
 
-        # r = np.sqrt(6. / (shape[0] + shape[1]))
-        unfiniter = UniformInitializer(0.01)
-        self.attention_w1 = self.model.add_parameters((self.att_dim, 2 * self.src_nhids), unfiniter)
-        self.attention_w2 = self.model.add_parameters(
-            (self.att_dim, 2 * self.layers * self.trg_nhids), unfiniter)
-        self.attention_v = self.model.add_parameters((1, self.att_dim), ConstInitializer(0.))
+        self.dec_2_Wz_name = 'GRU_Dec_Wz_2'
+        self.dec_2_Wr_name = 'GRU_Dec_Wr_2'
+        self.dec_2_Wh_name = 'GRU_Dec_Wh_2'
+        self.dec_2_h0_name = 'GRU_Dec_h0_2'
 
-        self.att_t_w = self.model.add_parameters((self.trg_nhids, 2 * self.src_nhids), unfiniter)
-        self.att_t_b = self.model.add_parameters((self.trg_nhids), ConstInitializer(0.))
+        self.combine_out_W_name = 'combine_out_W'
+        self.combine_out_b_name = 'combine_out_b'
 
-        self.dec_w_init = self.model.add_parameters((self.trg_nhids, 2 * self.src_nhids), unfiniter)
-        self.dec_b_init = self.model.add_parameters((self.trg_nhids), ConstInitializer(0.))
+        self.logistic_W_name = 'logistic_W'
+        self.logistic_b_name = 'logistic_b'
 
-        # self.no_voc_w = self.model.add_parameters(
-        #    (self.svoc_size, self.semb_dim + 2 * self.src_nhids + self.trg_nhids), unfiniter)
-        self.no_voc_w = self.model.add_parameters(
-            (self.svoc_size, self.temb_dim + self.trg_nhids + self.trg_nhids), unfiniter)
-        self.no_voc_b = self.model.add_parameters((self.svoc_size), ConstInitializer(0.))
+        #self.activation = rectify
+        self.activation = tanh
+
+        self.fwd_gru = GRU(self.model, swemb_dims,
+                           enc_hidden_units, prefix='GRU_Enc_fwd')
+        self.bwd_gru = GRU(self.model, swemb_dims,
+                           enc_hidden_units, prefix='GRU_Enc_bwd')
 
         '''
-        self.dec_w_cz = self.model.add_parameters((self.hid_dim, 2 * self.src_nhids), unfiniter)
-        self.dec_w_hz = self.model.add_parameters((self.hid_dim, self.hid_dim), unfiniter)
-        self.dec_b_z = self.model.add_parameters((self.hid_dim), ConstInitializer(0.))
-
-        self.dec_w_cr = self.model.add_parameters((self.hid_dim, 2 * self.src_nhids), unfiniter)
-        self.dec_w_hr = self.model.add_parameters((self.hid_dim, self.hid_dim), unfiniter)
-        self.dec_b_r = self.model.add_parameters((self.hid_dim), ConstInitializer(0.))
-
-        self.dec_w_ch = self.model.add_parameters((self.hid_dim, 2 * self.src_nhids), unfiniter)
-        self.dec_w_hh = self.model.add_parameters((self.hid_dim, self.hid_dim), unfiniter)
-        self.dec_b_h = self.model.add_parameters((self.hid_dim), ConstInitializer(0.))
+        self.dec_gru1 = GRU(self.model, twemb_dims,
+                            dec_hidden_units, prefix='dec_gru')
+        self.dec_gru2 = GRU(self.model, 2 * enc_hidden_units,
+                            dec_hidden_units, prefix='dec_gru')
         '''
 
-    def s_sent_id2emb(self, sentence):
-        return [self.s_lookup_table[wid] for wid in sentence]
+    def init_params(self):
 
-    def t_sent_id2emb(self, sentence):
-        return [self.t_lookup_table[wid] for wid in sentence]
+        self.lp_src_lookup_table = self.model.add_lookup_parameters(
+            (self.src_vocab_size, self.swemb_dims)
+        )
 
-    def run_lstm(self, initial_state, input_vecs):
-        s = initial_state
-        outs = []
-        for vec in input_vecs:
-            s = s.add_input(vec)
-            output = s.output()
-            outs.append(output)
-        return outs
+        self.lp_trg_lookup_table = self.model.add_lookup_parameters(
+            (self.trg_vocab_size, self.twemb_dims)
+        )
 
-    def bi_enc_sentence(self, sentence):
-        inv_sentence = list(reversed(sentence))  # len*(emb, batch)
-        fwd_enc_vec = self.run_lstm(
-            self.enc_fwd_lstm.initial_state(), sentence)
-        bck_enc_vec = self.run_lstm(
-            self.enc_bck_lstm.initial_state(), inv_sentence)
-        bck_enc_vec = list(reversed(bck_enc_vec))
-        # src_len * (2*src_nhids,)
-        return [concatenate(list(p)) for p in zip(fwd_enc_vec, bck_enc_vec)]
+        scale = 0.01
 
-    def attend(self, ctx_vecs, state):
-        w1 = parameter(self.attention_w1)
-        w2 = parameter(self.attention_w2)
-        v = parameter(self.attention_v)
-        concat_state_output = concatenate(list(state.s()))  # s:(trg_nhids,)
-        logger.debug('concatenate of {} {}'.format(type(concat_state_output),
-                                                   concat_state_output.npvalue().shape))
-        # concatenate the current state and current output
-        w2a1 = w2 * concat_state_output     # (att_dim,)
-        weights = []
-        for ctx_vec in ctx_vecs:
-            # ctx_vec: (2*src_nhids,)
-            weight_one_sword = v * tanh(w1 * ctx_vec + w2a1)   # (1,) * batch
-            weights.append(weight_one_sword)
-        weights_probs = softmax(concatenate(weights))   # src_len
-        ctx_with_attend = esum(
-            [c * p for c, p in zip(ctx_vecs, weights_probs)])
-        # print 'context with attention', ctx_with_attend.npvalue().shape
-        # (2*src_nhids,) * batch   weighted average over source sentence length
-        # weighted average over all encoded vector (2*src_hids,) of source words
-        return ctx_with_attend
+        self.p_dec_1_W_z = self.model.add_parameters(
+            (self.dec_hidden_units, self.twemb_dims + self.dec_hidden_units),
+            init=UniformInitializer(scale)
+        )
 
-    def forward(self, ctx_vecs, ref):
-        w = parameter(self.no_voc_w)
-        b = parameter(self.no_voc_b)
+        self.p_dec_1_W_r = self.model.add_parameters(
+            (self.dec_hidden_units, self.twemb_dims + self.dec_hidden_units),
+            init=UniformInitializer(scale)
+        )
 
-        s0 = self.dec_lstm.initial_state()
-        s = s0.add_input(vecInput(self.hid_dim * 2))  # (2*hid_dim,)
-        losses = []
-        for wid in ref:
-            ctx_with_attend = self.attend(ctx_vecs, s)  # (2*hid_dim,)
+        self.p_dec_1_W_h = self.model.add_parameters(
+            (self.dec_hidden_units, self.twemb_dims + self.dec_hidden_units),
+            init=UniformInitializer(scale)
+        )
 
-            s = s.add_input(ctx_with_attend)
-            # print s.output().npvalue().shape
-            # print type(w)
-            # print type(s.output())
-            out = w * s.output() + b    # (svoc_size, 1)
-            dist_voc = softmax(out)
-            losses.append(-log(pick(dist_voc, wid)))
-        sumloss = esum(losses)
-        return sumloss
+        self.p_attention_W_1 = self.model.add_parameters(
+            (self.align_dims, 2 * self.enc_hidden_units),
+            init=UniformInitializer(scale)
+        )
+        self.p_attention_W_2 = self.model.add_parameters(
+            (self.align_dims, self.dec_hidden_units),
+            init=UniformInitializer(scale)
+        )
+        self.p_attention_v = self.model.add_parameters(
+            (1, self.align_dims),
+            init=ConstInitializer(0.)
+        )
 
-    import configurations
+        self.p_dec_2_W_z = self.model.add_parameters(
+            (self.dec_hidden_units, self.dec_hidden_units + 2 * self.enc_hidden_units),
+            init=UniformInitializer(scale)
+        )
 
-    def translate(self, src_sent, ref_sent, eos_idx=0, svoc=None, tvoc=None):
-        def sample(probs):
-            rnd = np.random.random()
-            for i, p in enumerate(probs):
-                rnd -= p
-                if rnd <= 0:
-                    break
-            return i
+        self.p_dec_2_W_r = self.model.add_parameters(
+            (self.dec_hidden_units, self.dec_hidden_units + 2 * self.enc_hidden_units),
+            init=UniformInitializer(scale)
+        )
 
-        s_embedded = self.s_sent_id2emb(src_sent)
-        print len(s_embedded), s_embedded[0].npvalue().shape
-        encoded = self.bi_enc_sentence(s_embedded)
-        print len(encoded), encoded[0].npvalue().shape
+        self.p_dec_2_W_h = self.model.add_parameters(
+            (self.dec_hidden_units, self.dec_hidden_units + 2 * self.enc_hidden_units),
+            init=UniformInitializer(scale)
+        )
 
-        t_embedded = self.t_sent_id2emb(ref_sent)
-        print len(t_embedded), t_embedded[0].npvalue().shape
+        self.p_dec_2_h0 = self.model.add_parameters(
+            (self.dec_hidden_units, ),
+            init=ConstInitializer(0.)
+        )
 
-        w = parameter(self.no_voc_w)
-        b = parameter(self.no_voc_b)
-        a2tw = parameter(self.att_t_w)
-        a2tb = parameter(self.att_t_b)
+        self.p_combine_out_W = self.model.add_parameters(
+            (self.logistic_in_dims, self.twemb_dims +
+             self.dec_hidden_units + 2 * self.enc_hidden_units),
+            init=UniformInitializer(scale)
+        )
+        self.p_combine_out_b = self.model.add_parameters(
+            (self.logistic_in_dims, ),
+            init=ConstInitializer(0.)
+        )
 
-        prevy_embbed = inputVector(np.zeros((self.temb_dim,)))
+        self.p_logistic_W = self.model.add_parameters(
+            (self.trg_vocab_size, self.logistic_in_dims),
+            init=UniformInitializer(scale)
+        )
+        self.p_logistic_b = self.model.add_parameters(
+            (self.trg_vocab_size, ),
+            init=ConstInitializer(0.)
+        )
 
-        s0 = self.dec_lstm.initial_state()
-        start_input = self.init_dec_input(encoded)
+        sys.stderr.write('init network parameters done: \n')
+        self.params = OrderedDict({})
 
-        print start_input.npvalue().shape
-        s = self.dec_lstm.initial_state().add_input(start_input)
-        out_idvec = []
-        maxlen = len(src_sent) * 2
-        for i in range(maxlen):
-            ctx_with_attend = self.attend(encoded, s)
-            print ctx_with_attend.npvalue().shape
-            ctx_with_attend = a2tw * ctx_with_attend + a2tb
-            print ctx_with_attend.npvalue().shape
-            s = s.add_input(ctx_with_attend)
-            concat = concatenate([prevy_embbed, ctx_with_attend, s.output()])
-            print concat.npvalue().shape
-            out = w * concat + b  # (voc, ) * batch
-            print out.npvalue().shape
-            probs = softmax(out)
-            probs = probs.vec_value()
-            nwid = sample(probs)    # randomly
-            prevy_embbed = self.t_lookup_table[nwid]
-            if nwid == eos_idx:
-                break
-            out_idvec.append(nwid)
-        print '[src] {}'.format(' '.join([svoc[i] for i in src_sent]))
-        print '[ref] {}'.format(' '.join([tvoc[i] for i in ref_sent]))
-        print '[out] {}'.format(' '.join([tvoc[i] for i in out_idvec]))
-        return out_idvec
+        self.params[self.src_lookup_table_name] = self.lp_src_lookup_table
+        self.params[self.trg_lookup_table_name] = self.lp_trg_lookup_table
+        self.params.update(self.fwd_gru.params)
+        self.params.update(self.fwd_gru.params)
+        self.params.update(self.bwd_gru.params)
 
-    def sent_loss(self, x, y):
-        # renew_cg()
-        emb_x = self.s_sent_id2emb(x)
-        enc = self.bi_enc_sentence(emb_x)    # (srclen, 2*hid_dim)
-        sentloss = self.forward(enc, y)
-        return sentloss
+        self.params[self.dec_1_Wz_name] = self.p_dec_1_W_z
+        self.params[self.dec_1_Wr_name] = self.p_dec_1_W_r
+        self.params[self.dec_1_Wh_name] = self.p_dec_1_W_h
 
-    def init_dec_input(self, xbienc_lhb, bxm=None):
-        w = parameter(self.dec_w_init)
-        b = parameter(self.dec_b_init)
-        np_ctx = []
-        for c in xbienc_lhb:
-            np_ctx.append(c.npvalue())
-        np_ctx = np.array(np_ctx)
-        if bxm is not None:
-            bxm = np.transpose(bxm)   # (len, batch)
-            ctx_mean = (np_ctx * bxm[:, None, :]).sum(0) / bxm.sum(0)
-        else:
-            ctx_mean = np_ctx.mean(0)
-        # F means to flatten in column-major order, as dynet, (2*src_nhids, batch)
-        ctx_dy = inputMatrix(ctx_mean.flatten('F').tolist(), ctx_mean.shape)
-        # init_input = tanh(w * ctx_dy + b)    # why doesn't this work?
-        if ctx_dy.npvalue().ndim == 1:
-            init_input = tanh(w * ctx_dy + b)
-        else:
-            init_input = tanh(colwise_add(w * ctx_dy, b))
-        logger.debug('decoder initial input {} {}'.format(
-            type(init_input), init_input.npvalue().shape))
-        return init_input
+        self.params[self.attention_W_1_name] = self.p_attention_W_1
+        self.params[self.attention_W_2_name] = self.p_attention_W_2
+        self.params[self.attention_v_name] = self.p_attention_v
 
-    def convert_dec_state(self, ctx_watt, s, bxm=None):
-        w_cz = parameter(self.dec_w_cz)
-        w_hz = parameter(self.dec_w_hz)
-        b_z = parameter(self.dec_b_z)
+        self.params[self.dec_2_Wz_name] = self.p_dec_2_W_z
+        self.params[self.dec_2_Wr_name] = self.p_dec_2_W_r
+        self.params[self.dec_2_Wh_name] = self.p_dec_2_W_h
+        self.params[self.dec_2_h0_name] = self.p_dec_2_h0
 
-        w_cr = parameter(self.dec_w_cr)
-        w_hr = parameter(self.dec_w_hr)
-        b_r = parameter(self.dec_b_r)
+        self.params[self.combine_out_W_name] = self.p_combine_out_W
+        self.params[self.combine_out_b_name] = self.p_combine_out_b
 
-        w_ch = parameter(self.dec_w_ch)
-        w_hh = parameter(self.dec_w_hh)
-        b_h = parameter(self.dec_b_h)
+        self.params[self.logistic_W_name] = self.p_logistic_W
+        self.params[self.logistic_b_name] = self.p_logistic_b
 
-        s = s.s()[0]
-        # colwise_add(w_cz * ctx_watt, b_z)
-        logger.debug('w_cz: {} {}'.format(type(w_cz), w_cz.npvalue().shape))
-        logger.debug('attention {} {}'.format(
-            type(ctx_watt), ctx_watt.npvalue().shape))
-        # z = logistic(w_cz * ctx_watt + w_hz * s + b_z)    # sigmoid
-        # r = logistic(w_cr * ctx_watt + w_hr * s + b_r)    # sigmoid
+    def prepare_params(self):
 
-        # zw = w_cz * ctx_watt + w_hz * s
-        # ctx_watt_dy = matInput(cshape[0], cshape[1])
-        # ctx_watt_set(ctx_watt_npvalue().flatten())    # problem here...
-        # by column set
-        ctx_watt_dy = exp_to_input(ctx_watt)
-        s_dy = exp_to_input(s)
-        z = logistic(colwise_add(w_cz * ctx_watt_dy + w_hz * s_dy, b_z))
-        # z = logistic(colwise_add((w_cz * ctx_watt + w_hz * s), b_z))
-        # # sigmoid
-        r = logistic(colwise_add(
-            w_cr * ctx_watt_dy + w_hr * s_dy, b_r))    # sigmoid
-        c_h = w_ch * ctx_watt_dy
+        self.dec_1_W_z = parameter(self.p_dec_1_W_z)
+        self.dec_1_W_r = parameter(self.p_dec_1_W_r)
+        self.dec_1_W_h = parameter(self.p_dec_1_W_h)
 
-        hidden = tanh(cwise_multiply(
-            colwise_add(w_hh * s_dy, b_h), r) + c_h)
-        print 'z:', type(z)
-        print z.npvalue().shape
-        hidden = cwise_multiply(s_dy, z) + cwise_multiply((1. - z), hidden)
+        self.w1 = parameter(self.p_attention_W_1)
+        self.w2 = parameter(self.p_attention_W_2)
+        self.v = parameter(self.p_attention_v)
 
-        bxm = np.transpose(bxm)
-        hidden_np = hidden.npvalue()
-        if bxm is not None:
-            hidden = bxm[:, None] * hidden_np + (1. - bxm)[:, None] * s.npvalue()
-        hshape = hidden.shape     # (src_len, batch)
-        hidden_dy = vecInput(hshape[0] * hshape[1])
-        hidden_dy.set(hidden.flatten())
-        hidden_dy = transpose(reshape(hidden_dy, (hshape[1], hshape[0])))
-        return hidden_dy
+        self.dec_2_W_z = parameter(self.p_dec_2_W_z)
+        self.dec_2_W_r = parameter(self.p_dec_2_W_r)
+        self.dec_2_W_h = parameter(self.p_dec_2_W_h)
+        self.dec_2_h0 = parameter(self.p_dec_2_h0)
 
-    def upd_loss_wbatch_with_atten_sbs(self, bx, bxm, by, bym):
-        # (src_len, batch_size)
-        renew_cg()
-        w = parameter(self.no_voc_w)
-        b = parameter(self.no_voc_b)
-        a2tw = parameter(self.att_t_w)
-        a2tb = parameter(self.att_t_b)
+        self.combine_out_W = parameter(self.p_combine_out_W)
+        self.combine_out_b = parameter(self.p_combine_out_b)
 
-        minibatch_sizex, src_len = bx.shape
-        minibatch_sizey, trg_len = by.shape
-        assert(minibatch_sizex == minibatch_sizey)
-        minibatch_size = minibatch_sizex
-        # Batch lookup (for every timestamp of RNN or LSTM)
-        logger.debug('start one batch ...')
-        emb_batch_x = [lookup_batch(
-            self.s_lookup_table, [bx[i][j] for i in range(minibatch_size)]) for j in range(src_len)]
+        self.logistic_W = parameter(self.p_logistic_W)
+        self.logistic_b = parameter(self.p_logistic_b)
+
+    def save(self, filename):
+        '''
+        Append architecture hyperparameters to end of PyCNN model file.
+        '''
+        self.model.save(filename)
+
+        with open(filename, 'a') as f:
+            f.write('\n')
+            f.write('swemb_dims = {}\n'.format(self.swemb_dims))
+            f.write('twemb_dims = {}\n'.format(self.twemb_dims))
+            f.write('enc_hidden_units = {}\n'.format(self.enc_hidden_units))
+            f.write('dec_hidden_units = {}\n'.format(self.dec_hidden_units))
+            f.write('align_dims = {}\n'.format(self.align_dims))
+            f.write('logistic_in_dims = {}\n'.format(self.logistic_in_dims))
+            f.write('src_vocab_size = {}\n'.format(self.src_vocab_size))
+            f.write('trg_vocab_size = {}\n'.format(self.trg_vocab_size))
+            f.write('droprate = {}\n'.format(self.droprate))
+
+    def load_model(self, filename):
+        '''
+        Load model from file created by save() function
+        '''
+        with open(filename) as f:
+            f.readline()
+            f.readline()
+            swemb_dims = int(f.readline().split()[-1])
+            twemb_dims = int(f.readline().split()[-1])
+            enc_hidden_units = int(f.readline().split()[-1])
+            dec_hidden_units = int(f.readline().split()[-1])
+            align_dims = int(f.readline().split()[-1])
+            logistic_in_dims = int(f.readline().split()[-1])
+            src_vocab_size = int(f.readline().split()[-1])
+            trg_vocab_size = int(f.readline().split()[-1])
+
+        network = Network(
+            swemb_dims=swemb_dims,
+            twemb_dims=twemb_dims,
+            enc_hidden_units=enc_hidden_units,
+            dec_hidden_units=dec_hidden_units,
+            align_dims=align_dims,
+            logistic_in_dims=logistic_in_dims,
+            src_vocab_size=src_vocab_size,
+            trg_vocab_size=trg_vocab_size
+        )
+        network.model.load(filename)
+
+        return network
+
+    def encode(self, src_wids, src_masks=None):
+
+        fwd_state = self.fwd_gru.initial_state()
+        bwd_state = self.bwd_gru.initial_state()
+
+        mb_size = src_wids.shape[0]
+        src_len = src_wids.shape[1]
+
+        sentences = [lookup_batch(self.lp_src_lookup_table,
+                                  [src_wids[i][j] for i in range(mb_size)]) for j in range(src_len)]
         # src_len * (semb_dim, batch_size), type(_gdynet._lookupBatchExpression)
-        logger.debug('lookuptable => source length {}'.format(len(emb_batch_x)))
-        logger.debug('embedding {} {}'.format(
-            type(emb_batch_x[0]), emb_batch_x[0].npvalue().shape))
+        #sentence = [lookup(self.lp_src_lookup_table, w) for w in src_wids]
 
-        emb_batch_y = [lookup_batch(
-            self.t_lookup_table, [by[i][j] for i in range(minibatch_size)]) for j in range(trg_len)]
-        # trg_len * (temb_dim, batch_size), type(_gdynet._lookupBatchExpression)
+        fwd_out = []
+        for vec in sentences:
+            fwd_state = fwd_state.add_input(vec)
+            fwd_one_word = fwd_state.output()
+            fwd_out.append(fwd_one_word)
 
-        # src_len*(2*hid_dim, 80)
-        xbienc_lhb = self.bi_enc_sentence(emb_batch_x)
-        logger.debug('bi-encode => source length {}'.format(len(xbienc_lhb)))
-        logger.debug(
-            'bi-encode => {} {}'.format(type(xbienc_lhb[0]), xbienc_lhb[0].npvalue().shape))
+        if src_masks is not None:
+            for i, src_mask in enumerate(src_masks):
+                fwd_out[i] = fwd_out[i] * src_mask
 
-        s0 = self.dec_lstm.initial_state()
+        bwd_out = []
+        for vec in reversed(sentences):
+            bwd_state = bwd_state.add_input(vec)
+            bwd_one_word = bwd_state.output()
+            bwd_out.append(bwd_one_word)
 
-        # randomly initializing starting input
-        # s = s0.add_input(matInput(self.hid_dim * 2, minibatch_size))
-        # s = s0.add_input(vecInput(self.hid_dim))
+        if src_masks is not None:
+            for i, src_mask in enumerate(reversed(src_masks)):
+                bwd_out[i] = bwd_out[i] * src_mask
 
-        start_input = self.init_dec_input(xbienc_lhb, bxm=None)
-        start_input = reshape(start_input, (self.trg_nhids,), batch_size=minibatch_size)
-        # start_input = reshape(start_input, self.hid_dim, batch_size=minibatch_size)
-        logger.debug('after convert batch, start input {} {}'.format(
-            type(start_input), start_input.npvalue().shape))
-        # print start_input.npvalue()
+        enc = [concatenate([f, b])
+               for (f, b) in zip(fwd_out, bwd_out[::-1])]
 
-        s = s0.add_input(start_input)
-        total_reflen_batch = 0
-        logger.debug('decode state {} {}'.format(
-            type(s.h()[-1]), s.h()[-1].npvalue().shape))
+        return enc
 
-        # because we need to use attention, so we can not transduce here
-        # lstm_outputs = self.dec_lstm.initial_state().transduce(xbienc_lhb)
-        # print 'lstm output length in this batch', len(lstm_outputs)
-        # print 'lstm output batch shape', lstm_outputs[0].npvalue().shape
-        lstm_outputs, losses = [], []
-        for wid in range(trg_len):
-            # if by == 0:
-            #    continue
+    def attention(self, enc_vectors, h_t, src_masks=None):
 
-            emb_y = reshape(
-                emb_batch_y[wid], (self.temb_dim,), batch_size=minibatch_size)
+        attention_weights = []
+        w2dec = self.w2 * h_t
+        for enc_vec in enc_vectors:
+            attention_weight = self.v * tanh(self.w1 * enc_vec + w2dec)
+            attention_weights.append(attention_weight)
 
-            y_filter = filter(lambda x: x != 0, by[wid])
-            total_reflen_batch += len(y_filter)
+        if src_masks is not None:
+            for i, src_mask in enumerate(src_masks):
+                attention_weights[i] = attention_weights[i] * src_mask
 
-            ctx_with_attend = self.attend(xbienc_lhb, s)
-            # (2*src_nhids, ) * batch_size tensor
-            ctx_with_attend = a2tw * ctx_with_attend + a2tb
-            # (trg_nhids, ) * batch_size tensor
-            ctx_with_attend = reshape(
-                ctx_with_attend, (self.trg_nhids,), batch_size=minibatch_size)
-            logger.debug('context attention batch {} {}'.format(type(ctx_with_attend),
-                                                                ctx_with_attend.npvalue().shape))
-            # s = self.convert_dec_state(ctx_with_attend, s, bxm)
-            # s.set_h([ctx_with_attend])    # s.output() is (32,80), because s.s() are all (32,80)
-            # print s.h()[0].npvalue().shape
-            # print s.output().npvalue().shape
-            # out = self.convert_dec_state(ctx_with_attend, s, bxm)
-            # s.set_h([out])
-            step_lstm_out = s.output()  # (trg_nhids,) * b
-            logger.debug('each step lstm output => {} {}'.format(
-                type(step_lstm_out), step_lstm_out.npvalue().shape))
-            lstm_outputs.append(step_lstm_out)
+        attention_probs = softmax(concatenate(attention_weights))
 
-            s = s.add_input(ctx_with_attend)
-            # (temb_dim+src_nhids+trg_nhids, ) * batch
-            concat = concatenate([emb_y, ctx_with_attend, step_lstm_out])
-            out = w * concat + b  # (voc, ) * batch
-            out = transpose(reshape(out, (self.svoc_size,), batch_size=minibatch_size))  # (voc,1,b)
-            out = transpose(out)
-            logger.debug('final output: {}'.format(out.npvalue().shape))
-            logger.debug(list(by[:, wid].flatten()))
-            bloss = pickneglogsoftmax_batch(out, list(by[:, wid].flatten()))
-            sum_loss = sum_batches(bloss)
-            losses.append(sum_loss)
-        for l in losses:
-            logger.debug('one column words in each batch loss => {} {} {}'.format(
-                type(l), l.npvalue().shape, l.npvalue()))
-        # print 'sum => ', type(esum(losses)), esum(losses).npvalue().shape, esum(losses).npvalue()
-        # zw = average(losses)
-        # print type(losses)
-        # print 'avg => ', type(average(losses)), average(losses).npvalue().shape
-        avg = esum(losses) / len(losses)
-        return avg, minibatch_size, total_reflen_batch
+        out = []
+        for i in range(len(enc_vectors)):
+            enc_vec = enc_vectors[i]
+            attention_prob = pick(attention_probs, i)
+            out.append(enc_vec * attention_prob)
 
-    def upd_loss_wbatch_with_atten(self, bx, bxm, by, bym, tvoc=None):
-        # (src_len, batch_size)
-        renew_cg()
-        w = parameter(self.no_voc_w)
-        b = parameter(self.no_voc_b)
+        output_vec = esum(out)
+        return attention_probs, output_vec
 
-        minibatch_size, src_len = bx.shape
-        total_reflen_batch = sum(
-            [len(filter(lambda x: x != 0, y)) for y in by])
-        # lstm_outputs = self.dec_lstm.initial_state().transduce(xbienc_lhb)
-        # print 'lstm output length in this batch', len(lstm_outputs)
-        # print 'lstm output batch shape', lstm_outputs[0].npvalue().shape
-        lstm_outputs = []
+    def first_hidden(self, trg_bwids, s_tm1, trg_mask_expr=None):
 
-        errors = []
-        total_reflen_batch, minibatch_size, rowid = 0, 0, 0
-        for x, xm, y, ym in zip(bx, bxm, by, bym):
-            s0 = self.dec_lstm.initial_state()
-            s = s0.add_input(vecInput(self.hid_dim * 2))  # (2*hid_dim,)
-            x = x * xm
-            y = y * ym
-            x_filter = filter(lambda x: x != 0, x)
-            y_filter = filter(lambda x: x != 0, y)
-            len_one_ref_sent = len(y_filter)
-            emb_x = self.s_sent_id2emb(x_filter)
-            # print emb_x[0].npvalue().shape
-            enc = self.bi_enc_sentence(emb_x)    # (srclen, 2*hid_dim)
-            # print enc[0].npvalue().shape
-            losses = []
-            for wid in y_filter:
-                out = w * s.output() + b
-                ctx_with_attend = self.attend(enc, s)
-                s = s.add_input(ctx_with_attend)
-                dist_voc = softmax(out)
-                losses.append(-log(pick(dist_voc, wid)))
-            errors.append(esum(losses) / len_one_ref_sent)
-            total_reflen_batch += len_one_ref_sent
-            minibatch_size += 1
-            # errors.append(esum(losses))
-            # print type(loss_sent)
-            # print loss_sent
-            # print loss_sent.value()
-        bloss = esum(errors)
-        return bloss, total_reflen_batch, minibatch_size
+        y_tm1_emb = lookup_batch(self.lp_trg_lookup_table, list(trg_bwids))
+
+        x = concatenate([s_tm1, y_tm1_emb])
+        z = logistic(self.dec_1_W_z * x)
+        r = logistic(self.dec_1_W_r * x)
+        _h_t = tanh(self.dec_1_W_h *
+                    concatenate(
+                        [cwise_multiply(r, s_tm1), y_tm1_emb])
+                    )
+        h_t = cwise_multiply((1 - z), s_tm1) + cwise_multiply(z, _h_t)
+
+        if trg_mask_expr is not None:
+            h_t = h_t * trg_mask_expr + s_tm1 * (1. - trg_mask_expr)
+
+        return y_tm1_emb, h_t
+
+    def next_state(self, attent_vec, h_t, trg_mask_expr=None):
+
+        x = concatenate([h_t, attent_vec])
+        z = logistic(self.dec_2_W_z * x)
+        r = logistic(self.dec_2_W_r * x)
+        _h_t = tanh(self.dec_2_W_h *
+                    concatenate(
+                        [cwise_multiply(r, h_t), attent_vec])
+                    )
+        s_t = cwise_multiply((1 - z), h_t) + cwise_multiply(z, _h_t)
+
+        if trg_mask_expr is not None:
+            s_t = s_t * trg_mask_expr + h_t * (1. - trg_mask_expr)
+
+        return s_t
+
+    def comb_out(self, y_tm1_emb, s_t, a_t):
+
+        combine = concatenate([y_tm1_emb, s_t, a_t])
+
+        comb_out = self.activation(
+            self.combine_out_W * combine + self.combine_out_b)
+
+        return comb_out
+
+    def scores(self, comb_out, part=None):
+
+        if part is not None:
+            raise NotImplementedError
+        else:
+            scores = self.logistic_W * comb_out + self.logistic_b
+
+        return scores
+
+    def softmax(self, scores):
+
+        return softmax(scores)
+
+    def step_with_attention(self, s_tm1, y_tm1_emb, context):
+
+        _, h_t = first_hidden(y_tm1_emb, s_tm1)
+
+        _, attent_vec = self.attention(context, h_t)
+
+        s_t = next_state(attent_vec, h_t)
+
+        combine = concatenate([y_tm1_emb, s_t, attent_vec])
+
+        comb_out = self.activation(
+            self.combine_out_W * combine + self.combine_out_b)
+
+    def forward_with_attention(self, trg_mb_len, enc_vectors, src_mask_exprs, trg_mask_exprs):
+
+        output_vec = []
+
+        s_t = self.dec_2_h0
+
+        trg_len_bch = np.transpose(trg_mb_len)
+
+        for trg_bch_wids, mask in zip(trg_len_bch[:-1], trg_mask_exprs[:-1]):
+
+            y_tm1_emb, h_t = self.first_hidden(trg_bch_wids, s_t, mask)
+
+            _, attent_vec = self.attention(enc_vectors, h_t, src_mask_exprs)
+
+            s_t = self.next_state(attent_vec, h_t, mask)
+
+            combine = concatenate([y_tm1_emb, s_t, attent_vec])
+
+            comb_out = self.activation(
+                self.combine_out_W * combine + self.combine_out_b)
+
+            output_vec.append(comb_out * mask)
+
+        return output_vec
+
+    def batch_ce(self, input_vectors, golden_targets, trg_mask_exprs):
+
+        output_vec = []
+        losses = []
+        for (vec, gid, mask) in zip(input_vectors, golden_targets[1:], trg_mask_exprs):
+            scores = self.logistic_W * vec + self.logistic_b
+            loss = pickneglogsoftmax_batch(scores, gid)
+            loss = loss * mask
+            losses.append(loss)
+        loss = sum_batches(esum(losses))
+
+        return loss
+
+    def get_loss(self, src_mb_len, src_masks, trg_mb_len, trg_masks):
+
+        self.mb_size = len(src_mb_len)
+
+        src_mask_exprs = []
+        trg_mask_exprs = []
+        for src_mask, trg_mask in zip(np.transpose(src_masks), np.transpose(trg_masks)):
+            src_mask_expr = inputVector(src_mask)
+            src_mask_exprs.append(reshape(src_mask_expr, (1,), self.mb_size))
+
+            trg_mask_expr = inputVector(trg_mask)
+            trg_mask_exprs.append(reshape(trg_mask_expr, (1,), self.mb_size))
+
+        src_enc = self.encode(src_mb_len, src_mask_exprs)
+        comb_out = self.forward_with_attention(
+            trg_mb_len, src_enc, src_mask_exprs, trg_mask_exprs)
+        loss = self.batch_ce(comb_out, np.transpose(
+            trg_mb_len), trg_mask_exprs)
+
+        return loss

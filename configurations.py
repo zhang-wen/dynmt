@@ -6,22 +6,30 @@ def get_config_cs2en():
     # Sequences longer than this will be discarded
     config['seq_len'] = 50
 
-    # Number of hidden units in encoder/decoder GRU
-    config['hid_sz'] = 512
-    config['dec_nhids'] = 1024
+    config['lstm'] = False
 
-    # Dimension of the word embedding matrix in encoder/decoder
-    config['emb_sz'] = 512
-    config['dec_embed'] = 512
+    config['layer_cnt'] = 1
+
+    # dimension of the word embedding matrix in encoder/decoder
+    config['swemb_dims'] = 256
+    config['twemb_dims'] = 256
+
+    # demension of hidden units in encoder/decoder GRU
+    config['enc_hidden_units'] = 512
 
     # dimension of the output layer
-    config['att_sz'] = 512
-    config['lstm_num_of_layers'] = 1
+    config['dec_hidden_units'] = 512
+
+    # dimension of attention layer
+    config['align_dims'] = 128
+
+    # dimension of attention layer
+    config['logistic_in_dims'] = 256
 
     # Where to save model, this corresponds to 'prefix' in groundhog
-    config['models_out_dir'] = 'models_ch2en'
+    config['models_dir'] = 'models_ch2en'
     # test output dir
-    config['test_out_dir'] = ''
+    config['test_dir'] = ''
 
     # Optimization related ----------------------------------------------------
 
@@ -49,7 +57,7 @@ def get_config_cs2en():
     config['weight_noise_rec'] = False
 
     # Dropout ratio, applied only after readout maxout
-    config['dropout'] = 0.5
+    config['droprate'] = 0.5
 
     # Vocabulary/dataset related ----------------------------------------------
 
@@ -81,6 +89,20 @@ def get_config_cs2en():
     config['eos_token'] = '</S>'
     config['unk_token'] = '<UNK>'
 
+    # decoding parameters -------------------------------------------
+    config['use_batch'] = 0
+    config['use_score'] = 1  # because we add self-normalized in training
+    config['use_norm'] = 1
+    # whether manipulate vocabulary or not
+    config['use_mv'] = 0
+    # Beam-size
+    config['beam_size'] = 5
+    # 0: MLE, 1: Original, 2:Naive, 3:cube pruning
+    config['search_mode'] = 2
+    config['kl_threshold'] = 0.
+    # Him1, Hi, AiKL, LM
+    config['merge_way'] = 'Him1'
+
     # Early stopping based on bleu related ------------------------------------
 
     # Normalize cost according to sequence length after beam-search
@@ -102,18 +124,18 @@ def get_config_cs2en():
     config['val_prefix'] = 'nist02'
 
     # Model prefix
-    config['model_prefix'] = config['models_out_dir'] + '/params'
+    config['model_prefix'] = config['models_dir'] + '/params'
 
     # Validation set source file
     config['val_set'] = config['val_tst_dir'] + config['val_prefix'] + '.src'
 
     # Validation output directory
-    config['val_out_dir'] = 'valids'
+    config['valid_dir'] = 'valids'
     # Test output directory
     config['tst_out_dir'] = ''
 
     # Validation output file
-    config['val_set_out'] = config['val_out_dir'] + '/trans'
+    config['val_set_out'] = config['valid_dir'] + '/trans'
 
     # Beam-size
     config['beam_size'] = 12
@@ -132,29 +154,29 @@ def get_config_cs2en():
 
     # about 22500 batches for one epoch
     # Show samples from model after this many updates
-    #config['sampling_freq'] = 10000
-    config['sampling_freq'] = 10
+    #config['sampling_freq'] = 1000
+    config['sampling_freq'] = 100
 
     # Show details
-    #config['display_freq'] = 1000
-    config['display_freq'] = 10
+    config['display_freq'] = 100
 
     # Show this many samples at each sampling, need less than batch size
-    config['hook_samples'] = 3
+    config['hook_samples'] = 5
 
     # Validate bleu after this many updates
     #config['bleu_val_freq'] = 10000
     config['bleu_val_freq'] = 100
 
     # Start bleu validation after this many updates
-    config['val_burn_in'] = 10000
+    #config['val_burn_in'] = 10000
     config['val_burn_in'] = 30
 
     # whether use fixed sampling or randomly sampling
     config['if_fixed_sampling'] = True
 
     # Start fix sampling after this many batches
-    config['k_batch_start_sample'] = 1000
+    #config['k_batch_start_sample'] = 1000
+    config['k_batch_start_sample'] = 100
 
     # the v^T in Haitao's paper, the top k target words merged into target vocabulary
     config['topk_trg_vocab'] = 50

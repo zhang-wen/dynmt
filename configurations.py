@@ -33,6 +33,12 @@ def get_config_cs2en():
 
     # Optimization related ----------------------------------------------------
 
+    # ways of initializing parameters
+    config['uniform_params'] = False
+
+    # Gradient clipping threshold
+    config['clipping_threshold'] = 1.0
+
     # Batch size
     config['batch_size'] = 80
 
@@ -41,9 +47,6 @@ def get_config_cs2en():
 
     # Optimization step rule
     config['step_rule'] = 'AdaDelta'
-
-    # Gradient clipping threshold
-    config['step_clipping'] = 1.
 
     # Std of weight initialization
     config['weight_scale'] = 0.01
@@ -91,7 +94,7 @@ def get_config_cs2en():
 
     # decoding parameters -------------------------------------------
     config['use_batch'] = 0
-    config['use_score'] = 1  # because we add self-normalized in training
+    config['use_score'] = 0  # because we add self-normalized in training
     config['use_norm'] = 1
     # whether manipulate vocabulary or not
     config['use_mv'] = 0
@@ -136,9 +139,6 @@ def get_config_cs2en():
 
     # Validation output file
     config['val_set_out'] = config['valid_dir'] + '/trans'
-
-    # Beam-size
-    config['beam_size'] = 12
 
     # Timing/monitoring related -----------------------------------------------
 

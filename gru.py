@@ -10,7 +10,7 @@ import os
 
 from _gdynet import *
 print
-#from _dynet import *
+# from _dynet import *
 
 
 class GRU(object):
@@ -25,51 +25,94 @@ class GRU(object):
 
     number = 0
 
-    def __init__(self, model, input_dims, output_dims, prefix='GRU'):
+    def __init__(self, model, input_dims, output_dims, W_initer, b_initer, act=tanh, prefix='GRU'):
 
         self.input_dims = input_dims
         self.output_dims = output_dims
         self.model = model
+        self.activation = act
 
         GRU.number += 1
         self.name = '{}_{}'.format(prefix, GRU.number)
 
         self.W_z_xh_name = '{}_W_z'.format(self.name)
+        self.U_z_xh_name = '{}_U_z'.format(self.name)
+        self.b_z_xh_name = '{}_b_z'.format(self.name)
 
         self.W_r_xh_name = '{}_W_r'.format(self.name)
+        self.U_r_xh_name = '{}_U_r'.format(self.name)
+        self.b_r_xh_name = '{}_b_r'.format(self.name)
 
         self.W_h_xh_name = '{}_W_h'.format(self.name)
+        self.U_h_xh_name = '{}_U_h'.format(self.name)
+        self.b_h_xh_name = '{}_b_h'.format(self.name)
 
         self.h0_name = '{}_h0'.format(self.name)
 
-        scale = 0.01
-        # UniformInitializer(scale): uniform between -scale and scale.
         self.p_W_z_xh = self.model.add_parameters(
-            (output_dims, output_dims + input_dims),
-            init=UniformInitializer(scale)
+            (output_dims, input_dims),
+            init=W_initer
+        )
+
+        self.p_U_z_xh = self.model.add_parameters(
+            (output_dims, output_dims),
+            init=W_initer
+        )
+
+        self.p_b_z_xh = self.model.add_parameters(
+            (output_dims, ),
+            init=b_initer
         )
 
         self.p_W_r_xh = self.model.add_parameters(
-            (output_dims, output_dims + input_dims),
-            init=UniformInitializer(scale)
+            (output_dims, input_dims),
+            init=W_initer
+        )
+
+        self.p_U_r_xh = self.model.add_parameters(
+            (output_dims, output_dims),
+            init=W_initer
+        )
+
+        self.p_b_r_xh = self.model.add_parameters(
+            (output_dims, ),
+            init=b_initer
         )
 
         self.p_W_h_xh = self.model.add_parameters(
-            (output_dims, output_dims + input_dims),
-            init=UniformInitializer(scale)
+            (output_dims, input_dims),
+            init=W_initer
+        )
+
+        self.p_U_h_xh = self.model.add_parameters(
+            (output_dims, output_dims),
+            init=W_initer
+        )
+
+        self.p_b_h_xh = self.model.add_parameters(
+            (output_dims, ),
+            init=b_initer
         )
 
         self.p_h0 = self.model.add_parameters(
             (output_dims, ),
-            init=ConstInitializer(0.)
+            init=b_initer
         )
+        self.p_h0.set_updated(False)
 
         self.params = OrderedDict({})
 
         self.params[self.W_z_xh_name] = self.p_W_z_xh
+        self.params[self.U_z_xh_name] = self.p_U_z_xh
+        self.params[self.b_z_xh_name] = self.p_b_z_xh
+
         self.params[self.W_r_xh_name] = self.p_W_r_xh
+        self.params[self.U_r_xh_name] = self.p_U_r_xh
+        self.params[self.b_r_xh_name] = self.p_b_r_xh
+
         self.params[self.W_h_xh_name] = self.p_W_h_xh
-        self.params[self.h0_name] = self.p_h0
+        self.params[self.U_h_xh_name] = self.p_U_h_xh
+        self.params[self.b_h_xh_name] = self.p_b_h_xh
 
     class State(object):
 
@@ -79,28 +122,31 @@ class GRU(object):
             self.h_outputs = []
 
             self.W_z_xh = parameter(self.gru.p_W_z_xh)
+            self.U_z_xh = parameter(self.gru.p_U_z_xh)
+            self.b_z_xh = parameter(self.gru.p_b_z_xh)
 
             self.W_r_xh = parameter(self.gru.p_W_r_xh)
+            self.U_r_xh = parameter(self.gru.p_U_r_xh)
+            self.b_r_xh = parameter(self.gru.p_b_r_xh)
 
             self.W_h_xh = parameter(self.gru.p_W_h_xh)
+            self.U_h_xh = parameter(self.gru.p_U_h_xh)
+            self.b_h_xh = parameter(self.gru.p_b_h_xh)
 
             self.h = parameter(self.gru.p_h0)
 
-            # self.h_outputs.append(self.h)
+        def add_input(self, x):
 
-        def add_input(self, input_vec):
+            z = logistic(self.W_z_xh * x + self.U_z_xh * self.h + self.b_z_xh)
 
-            x = concatenate([self.h, input_vec])
+            r = logistic(self.W_r_xh * x + self.U_r_xh * self.h + self.b_r_xh)
 
-            z = logistic(self.W_z_xh * x)
+            _h = self.gru.activation(self.W_h_xh * x +
+                                     self.U_h_xh * cmult(r, self.h) +
+                                     self.b_h_xh
+                                     )
 
-            r = logistic(self.W_r_xh * x)
-            _h = tanh(self.W_h_xh *
-                      concatenate(
-                          [cwise_multiply(r, self.h), input_vec])
-                      )
-
-            h = cwise_multiply((1 - z), self.h) + cwise_multiply(z, _h)
+            h = cmult((1 - z), self.h) + cmult(z, _h)
 
             self.h = h
 

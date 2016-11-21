@@ -1,5 +1,3 @@
-from __future__ import print_function
-
 import numpy
 import copy
 import os
@@ -75,28 +73,28 @@ def trans_onesent(s, n, switchs, mode, trg_vocab_i2w, k, kl, lm=None, tvcb=None,
     return trans
 
 
-def trans_samples(srcs, trgs, network, switchs, src_vocab_i2w, trg_vocab_i2w, bos_id, eos_id, k=10, mode=0, kl=0.,
-                  lm=None, tvcb=None, ptv=None):
+def trans_samples(srcs, trgs, network, switchs, src_vocab_i2w, trg_vocab_i2w, bos_id, eos_id,
+                  k=10, mode=0, kl=0., lm=None, tvcb=None, ptv=None):
     for index in range(len(srcs)):
         # print 'before filter: '
         # print s[index]
         # [   37   785   600    44   160  4074   152  3737     2   399  1096   170      4     8    29999     0     0     0     0     0     0     0]
         s_filter = filter(lambda x: x != 0, srcs[index])
-        print ('[{:3}] {}'.format('src', _index2sentence(s_filter, src_vocab_i2w)))
+        sys.stderr.write('\n[{:3}] {}\n'.format('src', _index2sentence(s_filter, src_vocab_i2w)))
         # ndarray -> list
         # s_filter: [   37   785   600    44   160  4074   152  3737     2   399
         # 1096   170      4 8    29999]
         t_filter = filter(lambda x: x != 0, trgs[index])
-        print ('[{:3}] {}'.format('ref', _index2sentence(t_filter, trg_vocab_i2w)))
+        sys.stderr.write('[{:3}] {}\n'.format('ref', _index2sentence(t_filter, trg_vocab_i2w)))
 
         trans = trans_onesent(s_filter, network, switchs, mode, trg_vocab_i2w, k, kl, lm, tvcb, ptv)
-        print (trans)
+        sys.stderr.write('{}\n'.format(trans))
         trans_bfilter = _index2sentence(trans, trg_vocab_i2w, ptv)
-        print ('[{:3}] {}\n'.format('bef', trans_bfilter))
+        sys.stderr.write('[{:3}] {}\n'.format('bef', trans_bfilter))
 
         trans_filter = _filter_reidx(bos_id, eos_id, trans, switchs[-2], ptv)
         trans_filter = _index2sentence(trans_filter, trg_vocab_i2w, ptv)
-        print ('[{:3}] {}\n'.format('out', trans_filter))
+        sys.stderr.write('[{:3}] {}\n'.format('out', trans_filter))
 
 
 @exeTime
@@ -123,7 +121,7 @@ def translate(queue, rqueue, pid, network, switchs, mode, trg_vocab_i2w, k, kl, 
             break
 
         idx, src = req[0], req[1]
-        print ('{}-{}'.format(pid, idx))
+        sys.stderr.write('{}-{}\n'.format(pid, idx))
         sys.stdout.flush()
         s_filter = filter(lambda x: x != 0, src)
         trans = trans_onesent(s_filter, network, switchs, mode, trg_vocab_i2w, k, kl, lm, tvcb)
@@ -161,15 +159,15 @@ def multi_process(x_iter, network, switchs, mode, trg_vocab_i2w, k=10, n_process
             resp = rqueue.get()
             trans[resp[0]] = resp[1]
             if numpy.mod(idx + 1, 1) == 0:
-                print ('Sample {}/{} Done'.format((idx + 1), n_samples))
+                sys.stderr.write('Sample {}/{} Done\n'.format((idx + 1), n_samples))
                 sys.stdout.flush()
         return trans
 
-    print ('Translating ...')
+    sys.stderr.write('Translating ...\n')
     n_samples = _send_jobs(x_iter)     # sentence number in source file
     trans_res = _retrieve_jobs(n_samples)
     _finish_processes()
-    print ('Done ...')
+    sys.stderr.write('Done ...\n')
 
     return '\n'.join(trans_res)
 
@@ -177,4 +175,4 @@ def multi_process(x_iter, network, switchs, mode, trg_vocab_i2w, k=10, n_process
 if __name__ == "__main__":
     import sys
     res = valid_bleu(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
-    print(res)
+    sys.stderr.write(res)

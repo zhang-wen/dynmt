@@ -10,14 +10,21 @@ import random
 import sys
 import os
 
-from collections import OrderedDict
+import subprocess
+import collections
+import cPickle as pickle
+
 import numpy as np
 
+import configurations
+from utils import init_dirs
+from cp_sample import trans_samples
+from stream_with_dict import get_tr_stream, ensure_special_tokens
 from gru import GRU
 
 from _gdynet import *
 print
-#from _dynet import *
+# from _dynet import *
 
 
 class Network(object):
@@ -33,6 +40,8 @@ class Network(object):
         src_vocab_size=30000,
         trg_vocab_size=30000,
         droprate=0.,
+        uniform_params=False,
+        clipping_threshold=1.0,
     ):
 
         self.swemb_dims = swemb_dims
@@ -45,176 +54,257 @@ class Network(object):
         self.trg_vocab_size = trg_vocab_size
 
         self.droprate = droprate
+        self.uniform_params = uniform_params
+        self.clipping_threshold = clipping_threshold
 
         self.model = Model()
 
         self.trainer = AdadeltaTrainer(self.model, eps=1e-6, rho=0.95)
+        self.trainer.set_clip_threshold(self.clipping_threshold)
+
         random.seed(1)
 
         self.src_lookup_table_name = 'src_emb_lookuptable'
         self.trg_lookup_table_name = 'trg_emb_lookuptable'
 
-        self.dec_1_Wz_name = 'GRU_Dec_Wz_1'
-        self.dec_1_Wr_name = 'GRU_Dec_Wr_1'
-        self.dec_1_Wh_name = 'GRU_Dec_Wh_1'
+        self.dec_Wz_name = 'GRU_Dec_W_z'
+        self.dec_Uz_name = 'GRU_Dec_U_z'
+        self.dec_Cz_name = 'GRU_Dec_C_z'
+        self.dec_bz_name = 'GRU_Dec_b_z'
 
-        self.attention_W_1_name = 'attention_W_1'
-        self.attention_W_2_name = 'attention_W_2'
-        self.attention_v_name = 'attention_v'
+        self.dec_Wr_name = 'GRU_Dec_W_r'
+        self.dec_Ur_name = 'GRU_Dec_U_r'
+        self.dec_Cr_name = 'GRU_Dec_C_r'
+        self.dec_br_name = 'GRU_Dec_b_r'
 
-        self.dec_2_Wz_name = 'GRU_Dec_Wz_2'
-        self.dec_2_Wr_name = 'GRU_Dec_Wr_2'
-        self.dec_2_Wh_name = 'GRU_Dec_Wh_2'
-        self.dec_2_h0_name = 'GRU_Dec_h0_2'
+        self.dec_Wh_name = 'GRU_Dec_W_h'
+        self.dec_Uh_name = 'GRU_Dec_U_h'
+        self.dec_Ch_name = 'GRU_Dec_C_h'
+        self.dec_bh_name = 'GRU_Dec_b_h'
 
-        self.combine_out_W_name = 'combine_out_W'
-        self.combine_out_b_name = 'combine_out_b'
+        self.dec_init_Ws_name = 'GRU_Dec_init_Ws'
+        self.dec_init_bs_name = 'GRU_Dec_init_bs'
 
-        self.logistic_W_name = 'logistic_W'
-        self.logistic_b_name = 'logistic_b'
+        self.attention_W_name = 'attention_Wa'
+        self.attention_U_name = 'attention_Ua'
+        self.attention_v_name = 'attention_va'
+
+        self.combine_Uo_name = 'combine_U_o'
+        self.combine_Vo_name = 'combine_V_o'
+        self.combine_Co_name = 'combine_C_o'
+        self.combine_bo_name = 'combine_b_o'
+
+        self.logistic_W0_name = 'logistic_W0'
+        self.logistic_b0_name = 'logistic_b0'
 
         #self.activation = rectify
         self.activation = tanh
 
-        self.fwd_gru = GRU(self.model, swemb_dims,
-                           enc_hidden_units, prefix='GRU_Enc_fwd')
-        self.bwd_gru = GRU(self.model, swemb_dims,
-                           enc_hidden_units, prefix='GRU_Enc_bwd')
+        self.scale = 0.01
+        uniform_initer = UniformInitializer(self.scale)
 
-        '''
-        self.dec_gru1 = GRU(self.model, twemb_dims,
-                            dec_hidden_units, prefix='dec_gru')
-        self.dec_gru2 = GRU(self.model, 2 * enc_hidden_units,
-                            dec_hidden_units, prefix='dec_gru')
-        '''
+        # normal with mean and variance.
+        gaussian_initer_e3 = NormalInitializer(mean=0, var=0.001)
+        gaussian_initer_e2 = NormalInitializer(mean=0, var=0.01)
+
+        self.W_initer = uniform_initer if uniform_params else gaussian_initer_e2
+        self.Wa_initer = uniform_initer if uniform_params else gaussian_initer_e3
+        self.b_initer = ConstInitializer(0.)
+
+        self.fwd_gru = GRU(self.model, swemb_dims,
+                           enc_hidden_units, self.W_initer, self.b_initer, prefix='GRU_Enc_fwd')
+        self.bwd_gru = GRU(self.model, swemb_dims,
+                           enc_hidden_units, self.W_initer, self.b_initer, prefix='GRU_Enc_bwd')
 
     def init_params(self):
 
-        self.lp_src_lookup_table = self.model.add_lookup_parameters(
-            (self.src_vocab_size, self.swemb_dims)
+        lp_src_shape = (self.src_vocab_size, self.swemb_dims)
+        self.lp_src_lookup_table = self.model.add_lookup_parameters(lp_src_shape)
+
+        lp_trg_shape = (self.trg_vocab_size, self.twemb_dims)
+        self.lp_trg_lookup_table = self.model.add_lookup_parameters(lp_trg_shape)
+
+        if self.uniform_params:
+            self.lp_src_lookup_table.init_from_array(
+                np.random.uniform(-self.scale, self.scale, lp_src_shape))
+            self.lp_trg_lookup_table.init_from_array(
+                np.random.uniform(-self.scale, self.scale, lp_trg_shape))
+        else:
+            self.lp_src_lookup_table.init_from_array(
+                np.random.normal(0., 0.01, lp_src_shape)
+            )
+            self.lp_trg_lookup_table.init_from_array(
+                np.random.normal(0., 0.01, lp_trg_shape)
+            )
+
+        self.p_dec_W_z = self.model.add_parameters(
+            (self.dec_hidden_units, self.twemb_dims),
+            init=self.W_initer
+        )
+        self.p_dec_U_z = self.model.add_parameters(
+            (self.dec_hidden_units, self.dec_hidden_units),
+            init=self.W_initer
+        )
+        self.p_dec_C_z = self.model.add_parameters(
+            (self.dec_hidden_units, 2 * self.enc_hidden_units),
+            init=self.W_initer
+        )
+        self.p_dec_b_z = self.model.add_parameters(
+            (self.dec_hidden_units, ),
+            init=self.b_initer
         )
 
-        self.lp_trg_lookup_table = self.model.add_lookup_parameters(
-            (self.trg_vocab_size, self.twemb_dims)
+        self.p_dec_W_r = self.model.add_parameters(
+            (self.dec_hidden_units, self.twemb_dims),
+            init=self.W_initer
+        )
+        self.p_dec_U_r = self.model.add_parameters(
+            (self.dec_hidden_units, self.dec_hidden_units),
+            init=self.W_initer
+        )
+        self.p_dec_C_r = self.model.add_parameters(
+            (self.dec_hidden_units, 2 * self.enc_hidden_units),
+            init=self.W_initer
+        )
+        self.p_dec_b_r = self.model.add_parameters(
+            (self.dec_hidden_units, ),
+            init=self.b_initer
         )
 
-        scale = 0.01
-
-        self.p_dec_1_W_z = self.model.add_parameters(
-            (self.dec_hidden_units, self.twemb_dims + self.dec_hidden_units),
-            init=UniformInitializer(scale)
+        self.p_dec_W_h = self.model.add_parameters(
+            (self.dec_hidden_units, self.twemb_dims),
+            init=self.W_initer
+        )
+        self.p_dec_U_h = self.model.add_parameters(
+            (self.dec_hidden_units, self.dec_hidden_units),
+            init=self.W_initer
+        )
+        self.p_dec_C_h = self.model.add_parameters(
+            (self.dec_hidden_units, 2 * self.enc_hidden_units),
+            init=self.W_initer
+        )
+        self.p_dec_b_h = self.model.add_parameters(
+            (self.dec_hidden_units, ),
+            init=self.b_initer
         )
 
-        self.p_dec_1_W_r = self.model.add_parameters(
-            (self.dec_hidden_units, self.twemb_dims + self.dec_hidden_units),
-            init=UniformInitializer(scale)
+        self.p_dec_init_W_s = self.model.add_parameters(
+            (self.dec_hidden_units, self.dec_hidden_units),
+            init=self.W_initer
+        )
+        self.p_dec_init_b_s = self.model.add_parameters(
+            (self.dec_hidden_units, ),
+            init=self.b_initer
         )
 
-        self.p_dec_1_W_h = self.model.add_parameters(
-            (self.dec_hidden_units, self.twemb_dims + self.dec_hidden_units),
-            init=UniformInitializer(scale)
-        )
-
-        self.p_attention_W_1 = self.model.add_parameters(
-            (self.align_dims, 2 * self.enc_hidden_units),
-            init=UniformInitializer(scale)
-        )
-        self.p_attention_W_2 = self.model.add_parameters(
+        self.p_attention_W = self.model.add_parameters(
             (self.align_dims, self.dec_hidden_units),
-            init=UniformInitializer(scale)
+            init=self.Wa_initer
+        )
+        self.p_attention_U = self.model.add_parameters(
+            (self.align_dims, 2 * self.enc_hidden_units),
+            init=self.Wa_initer
         )
         self.p_attention_v = self.model.add_parameters(
             (1, self.align_dims),
-            init=ConstInitializer(0.)
+            init=self.b_initer
         )
 
-        self.p_dec_2_W_z = self.model.add_parameters(
-            (self.dec_hidden_units, self.dec_hidden_units + 2 * self.enc_hidden_units),
-            init=UniformInitializer(scale)
+        self.p_comb_U_o = self.model.add_parameters(
+            (2 * self.logistic_in_dims, self.dec_hidden_units),
+            init=self.W_initer
+        )
+        self.p_comb_V_o = self.model.add_parameters(
+            (2 * self.logistic_in_dims, self.twemb_dims),
+            init=self.W_initer
+        )
+        self.p_comb_C_o = self.model.add_parameters(
+            (2 * self.logistic_in_dims, 2 * self.enc_hidden_units),
+            init=self.W_initer
+        )
+        self.p_comb_b_o = self.model.add_parameters(
+            (2 * self.logistic_in_dims, ),
+            init=self.b_initer
         )
 
-        self.p_dec_2_W_r = self.model.add_parameters(
-            (self.dec_hidden_units, self.dec_hidden_units + 2 * self.enc_hidden_units),
-            init=UniformInitializer(scale)
+        self.p_logistic_W_0 = self.model.add_parameters(
+            (self.trg_vocab_size, 2 * self.logistic_in_dims),
+            init=self.W_initer
         )
-
-        self.p_dec_2_W_h = self.model.add_parameters(
-            (self.dec_hidden_units, self.dec_hidden_units + 2 * self.enc_hidden_units),
-            init=UniformInitializer(scale)
-        )
-
-        self.p_dec_2_h0 = self.model.add_parameters(
-            (self.dec_hidden_units, ),
-            init=ConstInitializer(0.)
-        )
-
-        self.p_combine_out_W = self.model.add_parameters(
-            (self.logistic_in_dims, self.twemb_dims +
-             self.dec_hidden_units + 2 * self.enc_hidden_units),
-            init=UniformInitializer(scale)
-        )
-        self.p_combine_out_b = self.model.add_parameters(
-            (self.logistic_in_dims, ),
-            init=ConstInitializer(0.)
-        )
-
-        self.p_logistic_W = self.model.add_parameters(
-            (self.trg_vocab_size, self.logistic_in_dims),
-            init=UniformInitializer(scale)
-        )
-        self.p_logistic_b = self.model.add_parameters(
+        self.p_logistic_b_0 = self.model.add_parameters(
             (self.trg_vocab_size, ),
-            init=ConstInitializer(0.)
+            init=self.b_initer
         )
 
         sys.stderr.write('init network parameters done: \n')
-        self.params = OrderedDict({})
+        self.params = collections.OrderedDict({})
 
         self.params[self.src_lookup_table_name] = self.lp_src_lookup_table
         self.params[self.trg_lookup_table_name] = self.lp_trg_lookup_table
         self.params.update(self.fwd_gru.params)
-        self.params.update(self.fwd_gru.params)
         self.params.update(self.bwd_gru.params)
 
-        self.params[self.dec_1_Wz_name] = self.p_dec_1_W_z
-        self.params[self.dec_1_Wr_name] = self.p_dec_1_W_r
-        self.params[self.dec_1_Wh_name] = self.p_dec_1_W_h
+        self.params[self.dec_Wz_name] = self.p_dec_W_z
+        self.params[self.dec_Uz_name] = self.p_dec_U_z
+        self.params[self.dec_Cz_name] = self.p_dec_C_z
+        self.params[self.dec_bz_name] = self.p_dec_b_z
 
-        self.params[self.attention_W_1_name] = self.p_attention_W_1
-        self.params[self.attention_W_2_name] = self.p_attention_W_2
+        self.params[self.dec_Wr_name] = self.p_dec_W_r
+        self.params[self.dec_Ur_name] = self.p_dec_U_r
+        self.params[self.dec_Cr_name] = self.p_dec_C_r
+        self.params[self.dec_br_name] = self.p_dec_b_r
+
+        self.params[self.dec_Wh_name] = self.p_dec_W_h
+        self.params[self.dec_Uh_name] = self.p_dec_U_h
+        self.params[self.dec_Ch_name] = self.p_dec_C_h
+        self.params[self.dec_bh_name] = self.p_dec_b_h
+
+        self.params[self.dec_init_Ws_name] = self.p_dec_init_W_s
+        self.params[self.dec_init_bs_name] = self.p_dec_init_b_s
+
+        self.params[self.attention_W_name] = self.p_attention_W
+        self.params[self.attention_U_name] = self.p_attention_U
         self.params[self.attention_v_name] = self.p_attention_v
 
-        self.params[self.dec_2_Wz_name] = self.p_dec_2_W_z
-        self.params[self.dec_2_Wr_name] = self.p_dec_2_W_r
-        self.params[self.dec_2_Wh_name] = self.p_dec_2_W_h
-        self.params[self.dec_2_h0_name] = self.p_dec_2_h0
+        self.params[self.combine_Uo_name] = self.p_comb_U_o
+        self.params[self.combine_Vo_name] = self.p_comb_V_o
+        self.params[self.combine_Co_name] = self.p_comb_C_o
+        self.params[self.combine_bo_name] = self.p_comb_b_o
 
-        self.params[self.combine_out_W_name] = self.p_combine_out_W
-        self.params[self.combine_out_b_name] = self.p_combine_out_b
-
-        self.params[self.logistic_W_name] = self.p_logistic_W
-        self.params[self.logistic_b_name] = self.p_logistic_b
+        self.params[self.logistic_W0_name] = self.p_logistic_W_0
+        self.params[self.logistic_b0_name] = self.p_logistic_b_0
 
     def prepare_params(self):
 
-        self.dec_1_W_z = parameter(self.p_dec_1_W_z)
-        self.dec_1_W_r = parameter(self.p_dec_1_W_r)
-        self.dec_1_W_h = parameter(self.p_dec_1_W_h)
+        self.Wz = parameter(self.p_dec_W_z)
+        self.Uz = parameter(self.p_dec_U_z)
+        self.Cz = parameter(self.p_dec_C_z)
+        self.bz = parameter(self.p_dec_b_z)
 
-        self.w1 = parameter(self.p_attention_W_1)
-        self.w2 = parameter(self.p_attention_W_2)
-        self.v = parameter(self.p_attention_v)
+        self.Wr = parameter(self.p_dec_W_r)
+        self.Ur = parameter(self.p_dec_U_r)
+        self.Cr = parameter(self.p_dec_C_r)
+        self.br = parameter(self.p_dec_b_r)
 
-        self.dec_2_W_z = parameter(self.p_dec_2_W_z)
-        self.dec_2_W_r = parameter(self.p_dec_2_W_r)
-        self.dec_2_W_h = parameter(self.p_dec_2_W_h)
-        self.dec_2_h0 = parameter(self.p_dec_2_h0)
+        self.Wh = parameter(self.p_dec_W_h)
+        self.Uh = parameter(self.p_dec_U_h)
+        self.Ch = parameter(self.p_dec_C_h)
+        self.bh = parameter(self.p_dec_b_h)
 
-        self.combine_out_W = parameter(self.p_combine_out_W)
-        self.combine_out_b = parameter(self.p_combine_out_b)
+        self.Ws_init = parameter(self.p_dec_init_W_s)
+        self.bs_init = parameter(self.p_dec_init_b_s)
 
-        self.logistic_W = parameter(self.p_logistic_W)
-        self.logistic_b = parameter(self.p_logistic_b)
+        self.Wa = parameter(self.p_attention_W)
+        self.Ua = parameter(self.p_attention_U)
+        self.va = parameter(self.p_attention_v)
+
+        self.Uo = parameter(self.p_comb_U_o)
+        self.Vo = parameter(self.p_comb_V_o)
+        self.Co = parameter(self.p_comb_C_o)
+        self.bo = parameter(self.p_comb_b_o)
+
+        self.W0 = parameter(self.p_logistic_W_0)
+        self.b0 = parameter(self.p_logistic_b_0)
 
     def save(self, filename):
         '''
@@ -233,6 +323,8 @@ class Network(object):
             f.write('src_vocab_size = {}\n'.format(self.src_vocab_size))
             f.write('trg_vocab_size = {}\n'.format(self.trg_vocab_size))
             f.write('droprate = {}\n'.format(self.droprate))
+            f.write('uniform_params = {}\n'.format(self.uniform_params))
+            f.write('clipping_threshold = {}\n'.format(self.clipping_threshold))
 
     def load_model(self, filename):
         '''
@@ -249,6 +341,8 @@ class Network(object):
             logistic_in_dims = int(f.readline().split()[-1])
             src_vocab_size = int(f.readline().split()[-1])
             trg_vocab_size = int(f.readline().split()[-1])
+            uniform_params = bool(f.readline().split()[-1])
+            clipping_threshold = float(f.readline().split()[-1])
 
         network = Network(
             swemb_dims=swemb_dims,
@@ -258,7 +352,9 @@ class Network(object):
             align_dims=align_dims,
             logistic_in_dims=logistic_in_dims,
             src_vocab_size=src_vocab_size,
-            trg_vocab_size=trg_vocab_size
+            trg_vocab_size=trg_vocab_size,
+            uniform_params=uniform_params,
+            clipping_threshold=clipping_threshold
         )
         network.model.load(filename)
 
@@ -297,17 +393,19 @@ class Network(object):
             for i, src_mask in enumerate(reversed(src_masks)):
                 bwd_out[i] = bwd_out[i] * src_mask
 
+        self.dec_s0 = self.Ws_init * bwd_out[0] + self.bs_init
+
         enc = [concatenate([f, b])
                for (f, b) in zip(fwd_out, bwd_out[::-1])]
 
         return enc
 
-    def attention(self, enc_vectors, h_t, src_masks=None):
+    def attention(self, enc_hs, ua_hjs, s_t, src_masks=None):
 
         attention_weights = []
-        w2dec = self.w2 * h_t
-        for enc_vec in enc_vectors:
-            attention_weight = self.v * tanh(self.w1 * enc_vec + w2dec)
+        wa_s_t = self.Wa * s_t
+        for ua_hj in ua_hjs:
+            attention_weight = self.va * self.activation(wa_s_t + ua_hj)
             attention_weights.append(attention_weight)
 
         if src_masks is not None:
@@ -317,105 +415,80 @@ class Network(object):
         attention_probs = softmax(concatenate(attention_weights))
 
         out = []
-        for i in range(len(enc_vectors)):
-            enc_vec = enc_vectors[i]
+        for i in range(len(enc_hs)):
+            h_j = enc_hs[i]
             attention_prob = pick(attention_probs, i)
-            out.append(enc_vec * attention_prob)
+            out.append(h_j * attention_prob)
 
         output_vec = esum(out)
         return attention_probs, output_vec
 
-    def first_hidden(self, trg_bwids, s_tm1, trg_mask_expr=None):
+    def next_state(self, y_tm1_bwids, c_t, s_tm1, trg_mask_expr=None):
 
-        y_tm1_emb = lookup_batch(self.lp_trg_lookup_table, list(trg_bwids))
+        y_tm1_emb = lookup_batch(self.lp_trg_lookup_table, list(y_tm1_bwids))
 
-        x = concatenate([s_tm1, y_tm1_emb])
-        z = logistic(self.dec_1_W_z * x)
-        r = logistic(self.dec_1_W_r * x)
-        _h_t = tanh(self.dec_1_W_h *
-                    concatenate(
-                        [cwise_multiply(r, s_tm1), y_tm1_emb])
-                    )
-        h_t = cwise_multiply((1 - z), s_tm1) + cwise_multiply(z, _h_t)
+        z = logistic(self.Wz * y_tm1_emb + self.Uz * s_tm1 + self.Cz * c_t + self.bz)
+        r = logistic(self.Wr * y_tm1_emb + self.Ur * s_tm1 + self.Cr * c_t + self.br)
+        _s_t = self.activation(self.Wh * y_tm1_emb +
+                               self.Uh * cmult(r, s_tm1) +
+                               self.Ch * c_t + self.bh
+                               )
 
-        if trg_mask_expr is not None:
-            h_t = h_t * trg_mask_expr + s_tm1 * (1. - trg_mask_expr)
-
-        return y_tm1_emb, h_t
-
-    def next_state(self, attent_vec, h_t, trg_mask_expr=None):
-
-        x = concatenate([h_t, attent_vec])
-        z = logistic(self.dec_2_W_z * x)
-        r = logistic(self.dec_2_W_r * x)
-        _h_t = tanh(self.dec_2_W_h *
-                    concatenate(
-                        [cwise_multiply(r, h_t), attent_vec])
-                    )
-        s_t = cwise_multiply((1 - z), h_t) + cwise_multiply(z, _h_t)
+        s_t = cmult((1 - z), s_tm1) + cmult(z, _s_t)
 
         if trg_mask_expr is not None:
-            s_t = s_t * trg_mask_expr + h_t * (1. - trg_mask_expr)
+            s_t = s_t * trg_mask_expr + s_tm1 * (1. - trg_mask_expr)
 
-        return s_t
+        return y_tm1_emb, s_t
 
-    def comb_out(self, y_tm1_emb, s_t, a_t):
+    def comb_out(self, s_t, y_tm1_emb, c_t, mask=None):
 
-        combine = concatenate([y_tm1_emb, s_t, a_t])
+        _t_i = self.Uo * s_t + self.Vo * y_tm1_emb + self.Co * c_t + self.bo
 
-        comb_out = self.activation(
-            self.combine_out_W * combine + self.combine_out_b)
+        if mask is not None:
+            _t_i = _t_i * mask
 
-        return comb_out
+        return _t_i
 
-    def scores(self, comb_out, part=None):
+    def next_scores(self, comb_out, part=None):
 
         if part is not None:
             raise NotImplementedError
         else:
-            scores = self.logistic_W * comb_out + self.logistic_b
+            scores = self.W0 * comb_out + self.b0
 
         return scores
 
-    def softmax(self, scores):
+    def cross_entropy(self, scores):
 
-        return softmax(scores)
+        return -log_softmax(scores)
 
-    def step_with_attention(self, s_tm1, y_tm1_emb, context):
+    def init_ua_hjs(self, enc_hs):
 
-        _, h_t = first_hidden(y_tm1_emb, s_tm1)
+        ua_hjs = []
+        for enc_hj in enc_hs:
+            ua_hjs.append(self.Ua * enc_hj)
 
-        _, attent_vec = self.attention(context, h_t)
+        return ua_hjs
 
-        s_t = next_state(attent_vec, h_t)
-
-        combine = concatenate([y_tm1_emb, s_t, attent_vec])
-
-        comb_out = self.activation(
-            self.combine_out_W * combine + self.combine_out_b)
-
-    def forward_with_attention(self, trg_mb_len, enc_vectors, src_mask_exprs, trg_mask_exprs):
+    def forward_with_attention(self, trg_mb_len, enc_hs, src_mask_exprs, trg_mask_exprs):
 
         output_vec = []
 
-        s_t = self.dec_2_h0
+        s_i = self.dec_s0
+        ua_hjs = self.init_ua_hjs(enc_hs)
 
         trg_len_bch = np.transpose(trg_mb_len)
 
         for trg_bch_wids, mask in zip(trg_len_bch[:-1], trg_mask_exprs[:-1]):
 
-            y_tm1_emb, h_t = self.first_hidden(trg_bch_wids, s_t, mask)
+            _, attent_vec = self.attention(enc_hs, ua_hjs, s_i, src_mask_exprs)
 
-            _, attent_vec = self.attention(enc_vectors, h_t, src_mask_exprs)
+            y_im1_emb, s_i = self.next_state(trg_bch_wids, attent_vec, s_i, mask)
 
-            s_t = self.next_state(attent_vec, h_t, mask)
+            t_i = self.comb_out(s_i, y_im1_emb, attent_vec, mask)
 
-            combine = concatenate([y_tm1_emb, s_t, attent_vec])
-
-            comb_out = self.activation(
-                self.combine_out_W * combine + self.combine_out_b)
-
-            output_vec.append(comb_out * mask)
+            output_vec.append(t_i)
 
         return output_vec
 
@@ -424,7 +497,7 @@ class Network(object):
         output_vec = []
         losses = []
         for (vec, gid, mask) in zip(input_vectors, golden_targets[1:], trg_mask_exprs):
-            scores = self.logistic_W * vec + self.logistic_b
+            scores = self.next_scores(vec)
             loss = pickneglogsoftmax_batch(scores, gid)
             loss = loss * mask
             losses.append(loss)
@@ -446,9 +519,265 @@ class Network(object):
             trg_mask_exprs.append(reshape(trg_mask_expr, (1,), self.mb_size))
 
         src_enc = self.encode(src_mb_len, src_mask_exprs)
+
         comb_out = self.forward_with_attention(
             trg_mb_len, src_enc, src_mask_exprs, trg_mask_exprs)
+
         loss = self.batch_ce(comb_out, np.transpose(
             trg_mb_len), trg_mask_exprs)
 
         return loss
+
+    @staticmethod
+    def train():
+
+        start_time = time.time()
+
+        config = getattr(configurations, 'get_config_cs2en')()
+
+        from manvocab import topk_target_vcab_list
+        ltopk_trg_vocab_idx = topk_target_vcab_list(**config)
+
+        sys.stderr.write('\nload source and target vocabulary ...\n')
+        sys.stderr.write('want to generate source dict {} and target dict {}: \n'.format(
+            config['src_vocab_size'], config['trg_vocab_size']))
+        src_vocab = pickle.load(open(config['src_vocab']))
+        trg_vocab = pickle.load(open(config['trg_vocab']))
+        # for k, v in src_vocab.iteritems():
+        #    print k, v
+        sys.stderr.write('~done source vocab count: {}, target vocab count: {}\n'.format(
+            len(src_vocab), len(trg_vocab)))
+        sys.stderr.write('vocabulary contains <S>, <UNK> and </S>\n')
+
+        seos_idx, teos_idx = config['src_vocab_size'] - \
+            1, config['trg_vocab_size'] - 1
+        src_vocab = ensure_special_tokens(
+            src_vocab, bos_idx=0, eos_idx=seos_idx, unk_idx=config['unk_id'])
+        trg_vocab = ensure_special_tokens(
+            trg_vocab, bos_idx=0, eos_idx=teos_idx, unk_idx=config['unk_id'])
+
+        # the trg_vocab is originally:
+        #   {'UNK': 1, '<s>': 0, '</s>': 0, 'is': 5, ...}
+        # after ensure_special_tokens, the trg_vocab becomes:
+        #   {'<UNK>': 1, '<S>': 0, '</S>': trg_vocab_size-1, 'is': 5, ...}
+        trg_vocab_i2w = {index: word for word, index in trg_vocab.iteritems()}
+        src_vocab_i2w = {index: word for word, index in src_vocab.iteritems()}
+        # after reversing, the trg_vocab_i2w become:
+        #   {1: '<UNK>', 0: '<S>', trg_vocab_size-1: '</S>', 5: 'is', ...}
+
+        init_dirs(**config)
+
+        sys.stderr.write('done\n')
+
+        nwk = Network(
+            swemb_dims=config['swemb_dims'],
+            twemb_dims=config['twemb_dims'],
+            enc_hidden_units=config['enc_hidden_units'],
+            dec_hidden_units=config['dec_hidden_units'],
+            align_dims=config['align_dims'],
+            logistic_in_dims=config['logistic_in_dims'],
+            uniform_params=config['uniform_params'],
+            clipping_threshold=config['clipping_threshold'],
+        )
+        nwk.init_params()
+
+        for name, param in nwk.params.iteritems():
+            sys.stderr.write('    {:20}: {}\n'.format(name, param.as_array().shape))
+
+        k_batch_start_sample = config['k_batch_start_sample']
+        batch_size, sample_size = config['batch_size'], config['hook_samples']
+        if batch_size < sample_size:
+            sys.stderr.write(
+                'batch size must be great or equal with sample size')
+            sys.exit(0)
+
+        batch_start_sample = np.random.randint(
+            2, k_batch_start_sample)  # [low, high)
+        sys.stderr.write('will randomly generate {} sample at {}th batch\n'.format(
+            sample_size, batch_start_sample))
+
+        batch_count, sent_count, val_time, best_score = 0, 0, 0, 0.
+        model_name = ''
+        sample_src_np, sample_trg_np = None, None
+
+        sample_switch = [0, config['use_batch'], config[
+            'use_score'], config['use_norm'], config['use_mv'], config['merge_way']]
+        beam_size = config['beam_size']
+        search_mode = config['search_mode']
+
+        start_time = time.time()
+        tr_stream = get_tr_stream(**config)
+        sys.stderr.write('Start training!!!\n')
+        max_epochs = config['max_epoch']
+
+        batch_sub_vocab = None
+        batch_vcb_fix = None
+
+        for epoch in range(max_epochs):
+            # take the batch sizes 3 as an example:
+            # tuple: tuple[0] is indexes of source sentence (np.ndarray)
+            # like array([[0, 23, 3, 4, 29999], [0, 2, 1, 29999], [0, 31, 333, 2, 1, 29999]])
+            # tuple: tuple[1] is indexes of source sentence mask (np.ndarray)
+            # like array([[1, 1, 1, 1, 1, 0], [1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 1]])
+            # tuple: tuple[2] is indexes of target sentence (np.ndarray)
+            # tuple: tuple[3] is indexes of target sentence mask (np.ndarray)
+            # tuple: tuple[4] is dict [0, 3, 4, 2, 29999]   # no duplicated word
+            # their shape: (batch_size * sentence_length)
+            epoch_start = time.time()
+            eidx = epoch + 1
+            sys.stderr.write(
+                '....................... Epoch [{} / {}] .......................\n'.format(
+                    eidx, max_epochs)
+            )
+            n_samples = 0
+            batch_count_in_cur_epoch = 0
+            tr_epoch_mean_cost = 0.
+            for tr_data in tr_stream.get_epoch_iterator():  # tr_data is a tuple  update one time for one batch
+
+                batch_count += 1
+                batch_count_in_cur_epoch += 1
+
+                bx, bxm, by, bym, btvob = tr_data[0], tr_data[
+                    1], tr_data[2], tr_data[3], tr_data[4]
+                n_samples += len(bx)
+                minibatch_size = by.shape[0]
+
+                if config['use_mv']:
+                    map_batchno_vcabset = collections.defaultdict(set)
+                    for l in btvob:
+                        map_batchno_vcabset[0] |= set(l)
+                    # small, do not write into file
+                    map_batchno_vcabset[0] |= set(ltopk_trg_vocab_idx)
+                    batch_sub_vocab = np.unique(
+                        np.array(sorted(map_batchno_vcabset[0])).astype('int64'))
+
+                renew_cg()
+                nwk.prepare_params()
+
+                nwk_start = time.time()
+                batch_error = nwk.get_loss(bx, bxm, by, bym)
+                t_nwk = time.time() - nwk_start
+
+                fwd_start = time.time()
+                batch_error_val = batch_error.scalar_value()
+                t_fwd = time.time() - fwd_start
+
+                tr_epoch_mean_cost += batch_error_val
+
+                bwd_start = time.time()
+                batch_error.backward()
+                t_bwd = time.time() - bwd_start
+
+                upd_start = time.time()
+                nwk.trainer.update()
+                t_upd = time.time() - upd_start
+
+                sys.stderr.write(
+                    'batch:{}, sent_len:{}, nwk:{}s fwd:{}s, bwd:{}s, upd:{}s\n'.format(
+                        batch_count_in_cur_epoch, by.shape[
+                            1], format(t_nwk, '0.3f'),
+                        format(t_fwd, '0.3f'), format(t_bwd, '0.3f'), format(t_upd, '0.3f')))
+
+                ud = time.time() - fwd_start
+
+                if batch_count % config['display_freq'] == 0:
+
+                    runtime = (time.time() - start_time) / 60.
+                    ref_sent_len = by.shape[1]
+                    ref_wcnt_wopad = np.count_nonzero(bym)
+                    ws_per_sent = ref_wcnt_wopad / minibatch_size
+                    sec_per_sent = ud / minibatch_size
+
+                    sys.stderr.write(
+                        '[epoch {:>2}]  '
+                        '[batch {: >5}]  '
+                        '[samples {: >7}]  '
+                        '[sent-level loss=>{: >8}]  '
+                        '[words/s=>{: >4}/{: >2}={:>6}]  '
+                        '[upd/s=>{:>6}/{: >2}={: >5}s]  '
+                        '[subvocab {: >4}]  '
+                        '[elapsed {:.3f}m]\n'.format(
+                            eidx,
+                            batch_count_in_cur_epoch,
+                            n_samples,
+                            format(batch_error_val, '0.3f'),
+                            ref_wcnt_wopad, minibatch_size, format(
+                                ws_per_sent, '0.3f'),
+                            format(ud, '0.3f'), minibatch_size, format(
+                                sec_per_sent, '0.3f'),
+                            len(batch_sub_vocab) if batch_sub_vocab is not None else 0,
+                            runtime)
+                    )
+
+                if batch_count % config['sampling_freq'] == 0:
+                    renew_cg()
+                    nwk.prepare_params()
+                    if sample_src_np is not None:
+                        trans_samples(sample_src_np, sample_trg_np, nwk, sample_switch, src_vocab_i2w,
+                                      trg_vocab_i2w, bos_id=0, eos_id=teos_idx, k=beam_size, mode=search_mode, ptv=batch_vcb_fix)
+                    else:
+                        trans_samples(bx[:sample_size], by[:sample_size], nwk, sample_switch, src_vocab_i2w,
+                                      trg_vocab_i2w, bos_id=0, eos_id=teos_idx, k=beam_size, mode=search_mode, ptv=batch_sub_vocab)
+
+                # sample, just take a look at the translate of some source
+                # sentences in training data
+                if config['if_fixed_sampling'] and batch_count == batch_start_sample:
+                    # select k sample from current batch
+                    # rand_rows = random.sample(xrange(batch_size), sample_size)
+                    rand_rows = np.random.choice(
+                        batch_size, sample_size, replace=False)
+                    # randomly select sample_size number from batch_size
+                    # rand_rows = np.random.randint(batch_size, size=sample_size)   #
+                    # np.int64, may repeat
+                    sample_src_np = np.zeros(
+                        shape=(sample_size, bx.shape[1])).astype('int64')
+                    sample_trg_np = np.zeros(
+                        shape=(sample_size, by.shape[1])).astype('int64')
+                    for id in xrange(sample_size):
+                        sample_src_np[id, :] = bx[rand_rows[id], :]
+                        sample_trg_np[id, :] = by[rand_rows[id], :]
+
+                    if config['use_mv']:
+                        m_batch_vcb_fix = collections.defaultdict(set)
+                        for l in btvob:
+                            m_batch_vcb_fix[0] |= set(l)
+                        m_batch_vcb_fix[0] |= set(ltopk_trg_vocab_idx)
+                        batch_vcb_fix = np.unique(
+                            np.array(sorted(m_batch_vcb_fix[0])).astype('int64'))
+
+            mean_cost_on_tr_data = tr_epoch_mean_cost / batch_count_in_cur_epoch
+            epoch_time_consume = time.time() - epoch_start
+            sys.stderr.write('End epoch [{}], average cost on all training data: {}, consumes time:'
+                             '{}s\n'.format(eidx, mean_cost_on_tr_data, format(epoch_time_consume, '0.3f')))
+            '''
+            # translate dev
+            val_time += 1
+            sys.stderr.write(
+		'Batch [{}], valid time [{}], save model ...\n'.format(batch_count, val_time))
+
+            # save models: search_model_ch2en/params_e5_upd3000.npz
+            model_name = '{}_e{}_upd{}.{}'.format(
+		config['model_prefix'], eidx, batch_count, 'npz')
+            trans.savez(model_name)
+            sys.stderr.write(
+		'start decoding on validation data [{}]...\n'.format(config['val_set']))
+            renew_cg()
+            nwk.prep_params()
+            cmd = ['sh trans.sh {} {} {} {} {} {} {} {} {} {}'.format(
+		eidx,
+		batch_count,
+		model_name,
+		search_mode,
+		beam_size,
+		config['use_norm'],
+		config['use_batch'],
+		config['use_score'],
+		1,
+		config['use_mv'])
+            ]
+            child = subprocess.Popen(cmd, shell=True)
+            '''
+
+        tr_time_consume = time.time() - start_time
+        sys.stderr.write('Training consumes time: {}s\n'.format(
+            format(tr_time_consume, '0.3f')))
